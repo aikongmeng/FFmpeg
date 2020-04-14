@@ -34,7 +34,7 @@
 #include "avfilter.h"
 #include "internal.h"
 
-typedef struct {
+typedef struct ANullContext {
     const AVClass *class;
     char   *channel_layout_str;
     uint64_t channel_layout;
@@ -80,10 +80,12 @@ static int query_formats(AVFilterContext *ctx)
     ANullContext *null = ctx->priv;
     int64_t chlayouts[] = { null->channel_layout, -1 };
     int sample_rates[] = { null->sample_rate, -1 };
+    int ret;
 
-    ff_set_common_formats        (ctx, ff_all_formats(AVMEDIA_TYPE_AUDIO));
-    ff_set_common_channel_layouts(ctx, avfilter_make_format64_list(chlayouts));
-    ff_set_common_samplerates    (ctx, ff_make_format_list(sample_rates));
+    if ((ret = ff_set_common_formats         (ctx, ff_all_formats              (AVMEDIA_TYPE_AUDIO))) < 0 ||
+        (ret = ff_set_common_channel_layouts (ctx, avfilter_make_format64_list (chlayouts         ))) < 0 ||
+        (ret = ff_set_common_samplerates     (ctx, ff_make_format_list         (sample_rates      ))) < 0)
+        return ret;
 
     return 0;
 }
@@ -112,11 +114,8 @@ static int request_frame(AVFilterLink *outlink)
         return AVERROR(ENOMEM);
 
     samplesref->pts = null->pts;
-    samplesref->channel_layout = null->channel_layout;
-    samplesref->sample_rate = outlink->sample_rate;
 
-    ret = ff_filter_frame(outlink, av_frame_clone(samplesref));
-    av_frame_free(&samplesref);
+    ret = ff_filter_frame(outlink, samplesref);
     if (ret < 0)
         return ret;
 

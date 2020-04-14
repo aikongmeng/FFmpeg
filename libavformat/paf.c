@@ -53,7 +53,7 @@ typedef struct PAFDemuxContext {
     int got_audio;
 } PAFDemuxContext;
 
-static int read_probe(AVProbeData *p)
+static int read_probe(const AVProbeData *p)
 {
     if ((p->buf_size >= strlen(MAGIC)) &&
         !memcmp(p->buf, MAGIC, strlen(MAGIC)))
@@ -104,13 +104,13 @@ static int read_header(AVFormatContext *s)
     p->nb_frames    = avio_rl32(pb);
     avio_skip(pb, 4);
 
-    vst->codec->width  = avio_rl32(pb);
-    vst->codec->height = avio_rl32(pb);
+    vst->codecpar->width  = avio_rl32(pb);
+    vst->codecpar->height = avio_rl32(pb);
     avio_skip(pb, 4);
 
-    vst->codec->codec_type = AVMEDIA_TYPE_VIDEO;
-    vst->codec->codec_tag  = 0;
-    vst->codec->codec_id   = AV_CODEC_ID_PAF_VIDEO;
+    vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+    vst->codecpar->codec_tag  = 0;
+    vst->codecpar->codec_id   = AV_CODEC_ID_PAF_VIDEO;
     avpriv_set_pts_info(vst, 64, 1, 10);
 
     ast = avformat_new_stream(s, 0);
@@ -118,12 +118,12 @@ static int read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
 
     ast->start_time            = 0;
-    ast->codec->codec_type     = AVMEDIA_TYPE_AUDIO;
-    ast->codec->codec_tag      = 0;
-    ast->codec->codec_id       = AV_CODEC_ID_PAF_AUDIO;
-    ast->codec->channels       = 2;
-    ast->codec->channel_layout = AV_CH_LAYOUT_STEREO;
-    ast->codec->sample_rate    = 22050;
+    ast->codecpar->codec_type     = AVMEDIA_TYPE_AUDIO;
+    ast->codecpar->codec_tag      = 0;
+    ast->codecpar->codec_id       = AV_CODEC_ID_PAF_AUDIO;
+    ast->codecpar->channels       = 2;
+    ast->codecpar->channel_layout = AV_CH_LAYOUT_STEREO;
+    ast->codecpar->sample_rate    = 22050;
     avpriv_set_pts_info(ast, 64, 1, 22050);
 
     p->buffer_size    = avio_rl32(pb);
@@ -194,7 +194,7 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
     PAFDemuxContext *p  = s->priv_data;
     AVIOContext     *pb = s->pb;
     uint32_t        count, offset;
-    int             size, i;
+    int             size, i, ret;
 
     if (p->current_frame >= p->nb_frames)
         return AVERROR_EOF;
@@ -203,8 +203,8 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
         return AVERROR_EOF;
 
     if (p->got_audio) {
-        if (av_new_packet(pkt, p->audio_size) < 0)
-            return AVERROR(ENOMEM);
+        if ((ret = av_new_packet(pkt, p->audio_size)) < 0)
+            return ret;
 
         memcpy(pkt->data, p->temp_audio_frame, p->audio_size);
         pkt->duration     = PAF_SOUND_SAMPLES * (p->audio_size / PAF_SOUND_FRAME_SIZE);
@@ -244,8 +244,8 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
 
     size = p->video_size - p->frames_offset_table[p->current_frame];
 
-    if (av_new_packet(pkt, size) < 0)
-        return AVERROR(ENOMEM);
+    if ((ret = av_new_packet(pkt, size)) < 0)
+        return ret;
 
     pkt->stream_index = 0;
     pkt->duration     = 1;

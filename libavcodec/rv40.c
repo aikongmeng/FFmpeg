@@ -109,6 +109,8 @@ static int get_dimension(GetBitContext *gb, const int *dim)
         val = dim[get_bits1(gb) - val];
     if(!val){
         do{
+            if (get_bits_left(gb) < 8)
+                return AVERROR_INVALIDDATA;
             t = get_bits(gb, 8);
             val += t << 2;
         }while(t == 0xFF);
@@ -187,7 +189,7 @@ static int rv40_decode_intra_types(RV34DecContext *r, GetBitContext *gb, int8_t 
             A = ptr[-r->intra_types_stride + 1]; // it won't be used for the last coefficient in a row
             B = ptr[-r->intra_types_stride];
             C = ptr[-1];
-            pattern = A + (B << 4) + (C << 8);
+            pattern = A + B * (1 << 4) + C * (1 << 8);
             for(k = 0; k < MODE2_PATTERNS_NUM; k++)
                 if(pattern == rv40_aic_table_index[k])
                     break;
@@ -231,7 +233,7 @@ static int rv40_decode_mb_info(RV34DecContext *r)
     int mb_pos = s->mb_x + s->mb_y * s->mb_stride;
 
     if(!r->s.mb_skip_run) {
-        r->s.mb_skip_run = svq3_get_ue_golomb(gb) + 1;
+        r->s.mb_skip_run = get_interleaved_ue_golomb(gb) + 1;
         if(r->s.mb_skip_run > (unsigned)s->mb_num)
             return -1;
     }
@@ -581,6 +583,6 @@ AVCodec ff_rv40_decoder = {
         AV_PIX_FMT_YUV420P,
         AV_PIX_FMT_NONE
     },
-    .init_thread_copy      = ONLY_IF_THREADS_ENABLED(ff_rv34_decode_init_thread_copy),
     .update_thread_context = ONLY_IF_THREADS_ENABLED(ff_rv34_decode_update_thread_context),
+    .caps_internal         = FF_CODEC_CAP_ALLOCATE_PROGRESS,
 };

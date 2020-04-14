@@ -54,27 +54,12 @@ static const char *type_string(int type)
     return "<UNKNOWN>";
 }
 
-int main(int argc, char *argv[])
+static int list_op(const char *input_dir)
 {
-    const char *input_dir = NULL;
     AVIODirEntry *entry = NULL;
     AVIODirContext *ctx = NULL;
     int cnt, ret;
     char filemode[4], uid_and_gid[20];
-
-    av_log_set_level(AV_LOG_DEBUG);
-
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s input_dir\n"
-                "API example program to show how to list files in directory "
-                "accessed through AVIOContext.\n", argv[0]);
-        return 1;
-    }
-    input_dir = argv[1];
-
-    /* register codecs and formats and other lavf/lavc components*/
-    av_register_all();
-    avformat_network_init();
 
     if ((ret = avio_open_dir(&ctx, input_dir, NULL)) < 0) {
         av_log(NULL, AV_LOG_ERROR, "Cannot open directory: %s.\n", av_err2str(ret));
@@ -114,6 +99,31 @@ int main(int argc, char *argv[])
 
   fail:
     avio_close_dir(&ctx);
+    return ret;
+}
+
+static void usage(const char *program_name)
+{
+    fprintf(stderr, "usage: %s input_dir\n"
+            "API example program to show how to list files in directory "
+            "accessed through AVIOContext.\n", program_name);
+}
+
+int main(int argc, char *argv[])
+{
+    int ret;
+
+    av_log_set_level(AV_LOG_DEBUG);
+
+    if (argc < 2) {
+        usage(argv[0]);
+        return 1;
+    }
+
+    avformat_network_init();
+
+    ret = list_op(argv[1]);
+
     avformat_network_deinit();
 
     return ret < 0 ? 1 : 0;

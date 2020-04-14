@@ -35,7 +35,6 @@
  *   http://www.pcisys.net/~melanson/codecs
  *
  * Supports: BGR24 (RGB 24bpp)
- *
  */
 
 #include <stdio.h>
@@ -47,14 +46,12 @@
 #include "bytestream.h"
 #include "internal.h"
 #include "lcl.h"
+#include "thread.h"
 
 #if CONFIG_ZLIB_DECODER
 #include <zlib.h>
 #endif
 
-/*
- * Decoder context
- */
 typedef struct LclDecContext {
     // Image type
     int imgtype;
@@ -158,14 +155,10 @@ static int zlib_decomp(AVCodecContext *avctx, const uint8_t *src, int src_len, i
 #endif
 
 
-/*
- *
- * Decode a frame
- *
- */
 static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame, AVPacket *avpkt)
 {
     AVFrame *frame = data;
+    ThreadFrame tframe = { .f = data };
     const uint8_t *buf = avpkt->data;
     int buf_size = avpkt->size;
     LclDecContext * const c = avctx->priv_data;
@@ -182,7 +175,7 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame, AVPac
     unsigned int len = buf_size;
     int linesize;
 
-    if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
+    if ((ret = ff_thread_get_buffer(avctx, &tframe, 0)) < 0)
         return ret;
 
     outptr = frame->data[0]; // Output image pointer
@@ -197,11 +190,10 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame, AVPac
                 ;
             } else if (c->flags & FLAG_MULTITHREAD) {
                 mthread_inlen = AV_RL32(buf);
-                if (len < 8) {
+                if (len < 8 || len - 8 < mthread_inlen) {
                     av_log(avctx, AV_LOG_ERROR, "len %d is too small\n", len);
                     return AVERROR_INVALIDDATA;
                 }
-                mthread_inlen = FFMIN(mthread_inlen, len - 8);
                 mthread_outlen = AV_RL32(buf + 4);
                 mthread_outlen = FFMIN(mthread_outlen, c->decomp_size);
                 mszh_dlen = mszh_decomp(buf + 8, mthread_inlen, c->decomp_buf, c->decomp_size);
@@ -467,17 +459,15 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame, AVPac
         return AVERROR_INVALIDDATA;
     }
 
+    frame->key_frame = 1;
+    frame->pict_type = AV_PICTURE_TYPE_I;
+
     *got_frame = 1;
 
     /* always report that the buffer was completely consumed */
     return buf_size;
 }
 
-/*
- *
- * Init lcl decoder
- *
- */
 static av_cold int decode_init(AVCodecContext *avctx)
 {
     LclDecContext * const c = avctx->priv_data;
@@ -512,7 +502,7 @@ static av_cold int decode_init(AVCodecContext *avctx)
         avctx->pix_fmt = AV_PIX_FMT_YUV422P;
         av_log(avctx, AV_LOG_DEBUG, "Image type is YUV 4:2:2.\n");
         if (avctx->width % 4) {
-            avpriv_request_sample(avctx, "Unsupported dimensions\n");
+            avpriv_request_sample(avctx, "Unsupported dimensions");
             return AVERROR_INVALIDDATA;
         }
         break;
@@ -547,7 +537,7 @@ static av_cold int decode_init(AVCodecContext *avctx)
 
     av_pix_fmt_get_chroma_sub_sample(avctx->pix_fmt, &subsample_h, &subsample_v);
     if (avctx->width % (1<<subsample_h) || avctx->height % (1<<subsample_v)) {
-        avpriv_request_sample(avctx, "Unsupported dimensions\n");
+        avpriv_request_sample(avctx, "Unsupported dimensions");
         return AVERROR_INVALIDDATA;
     }
 
@@ -632,11 +622,6 @@ static av_cold int decode_init(AVCodecContext *avctx)
     return 0;
 }
 
-/*
- *
- * Uninit lcl decoder
- *
- */
 static av_cold int decode_end(AVCodecContext *avctx)
 {
     LclDecContext * const c = avctx->priv_data;
@@ -660,7 +645,8 @@ AVCodec ff_mszh_decoder = {
     .init           = decode_init,
     .close          = decode_end,
     .decode         = decode_frame,
-    .capabilities   = AV_CODEC_CAP_DR1,
+    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE,
 };
 #endif
 
@@ -674,6 +660,7 @@ AVCodec ff_zlib_decoder = {
     .init           = decode_init,
     .close          = decode_end,
     .decode         = decode_frame,
-    .capabilities   = AV_CODEC_CAP_DR1,
+    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE,
 };
 #endif

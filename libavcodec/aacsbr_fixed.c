@@ -76,10 +76,9 @@ static VLC vlc_sbr[10];
 static void aacsbr_func_ptr_init(AACSBRContext *c);
 static const int CONST_LN2       = Q31(0.6931471806/256);  // ln(2)/256
 static const int CONST_RECIP_LN2 = Q31(0.7213475204);      // 0.5/ln(2)
-static const int CONST_SQRT2     = Q30(0.7071067812);      // sqrt(2)/2
 static const int CONST_076923    = Q31(0.76923076923076923077f);
 
-int fixed_log_table[10] =
+static const int fixed_log_table[10] =
 {
     Q31(1.0/2), Q31(1.0/3), Q31(1.0/4), Q31(1.0/5), Q31(1.0/6),
     Q31(1.0/7), Q31(1.0/8), Q31(1.0/9), Q31(1.0/10), Q31(1.0/11)
@@ -104,7 +103,7 @@ static int fixed_log(int x)
     return ret;
 }
 
-int fixed_exp_table[7] =
+static const int fixed_exp_table[7] =
 {
     Q31(1.0/2), Q31(1.0/6), Q31(1.0/24), Q31(1.0/120),
     Q31(1.0/720), Q31(1.0/5040), Q31(1.0/40320)
@@ -164,14 +163,18 @@ static void sbr_dequant(SpectralBandReplication *sbr, int id_aac)
             for (k = 0; k < sbr->n[sbr->data[0].bs_freq_res[e]]; k++) {
                 SoftFloat temp1, temp2, fac;
 
-                temp1.exp = sbr->data[0].env_facs[e][k].mant * alpha + 14;
+                temp1.exp = sbr->data[0].env_facs_q[e][k] * alpha + 14;
                 if (temp1.exp & 1)
                   temp1.mant = 759250125;
                 else
                   temp1.mant = 0x20000000;
                 temp1.exp = (temp1.exp >> 1) + 1;
+                if (temp1.exp > 66) { // temp1 > 1E20
+                    av_log(NULL, AV_LOG_ERROR, "envelope scalefactor overflow in dequant\n");
+                    temp1 = FLOAT_1;
+                }
 
-                temp2.exp = (pan_offset - sbr->data[1].env_facs[e][k].mant) * alpha;
+                temp2.exp = (pan_offset - sbr->data[1].env_facs_q[e][k]) * alpha;
                 if (temp2.exp & 1)
                   temp2.mant = 759250125;
                 else
@@ -187,9 +190,10 @@ static void sbr_dequant(SpectralBandReplication *sbr, int id_aac)
                 SoftFloat temp1, temp2, fac;
 
                 temp1.exp = NOISE_FLOOR_OFFSET - \
-                    sbr->data[0].noise_facs[e][k].mant + 2;
+                    sbr->data[0].noise_facs_q[e][k] + 2;
                 temp1.mant = 0x20000000;
-                temp2.exp = 12 - sbr->data[1].noise_facs[e][k].mant + 1;
+                av_assert0(temp1.exp <= 66);
+                temp2.exp = 12 - sbr->data[1].noise_facs_q[e][k] + 1;
                 temp2.mant = 0x20000000;
                 fac   = av_div_sf(temp1, av_add_sf(FLOAT_1, temp2));
                 sbr->data[0].noise_facs[e][k] = fac;
@@ -203,19 +207,22 @@ static void sbr_dequant(SpectralBandReplication *sbr, int id_aac)
                 for (k = 0; k < sbr->n[sbr->data[ch].bs_freq_res[e]]; k++){
                     SoftFloat temp1;
 
-                    temp1.exp = alpha * sbr->data[ch].env_facs[e][k].mant + 12;
+                    temp1.exp = alpha * sbr->data[ch].env_facs_q[e][k] + 12;
                     if (temp1.exp & 1)
                         temp1.mant = 759250125;
                     else
                         temp1.mant = 0x20000000;
                     temp1.exp = (temp1.exp >> 1) + 1;
-
+                    if (temp1.exp > 66) { // temp1 > 1E20
+                        av_log(NULL, AV_LOG_ERROR, "envelope scalefactor overflow in dequant\n");
+                        temp1 = FLOAT_1;
+                    }
                     sbr->data[ch].env_facs[e][k] = temp1;
                 }
             for (e = 1; e <= sbr->data[ch].bs_num_noise; e++)
                 for (k = 0; k < sbr->n_q; k++){
                     sbr->data[ch].noise_facs[e][k].exp = NOISE_FLOOR_OFFSET - \
-                        sbr->data[ch].noise_facs[e][k].mant + 1;
+                        sbr->data[ch].noise_facs_q[e][k] + 1;
                     sbr->data[ch].noise_facs[e][k].mant = 0x20000000;
                 }
         }
@@ -281,11 +288,12 @@ static void sbr_hf_inverse_filter(SBRDSPContext *dsp,
         shift = a00.exp;
         if (shift >= 3)
             alpha0[k][0] = 0x7fffffff;
+        else if (shift <= -30)
+            alpha0[k][0] = 0;
         else {
-            a00.mant <<= 1;
-            shift = 2-shift;
-            if (shift == 0)
-                alpha0[k][0] = a00.mant;
+            shift = 1-shift;
+            if (shift <= 0)
+                alpha0[k][0] = a00.mant * (1<<-shift);
             else {
                 round = 1 << (shift-1);
                 alpha0[k][0] = (a00.mant + round) >> shift;
@@ -295,11 +303,12 @@ static void sbr_hf_inverse_filter(SBRDSPContext *dsp,
         shift = a01.exp;
         if (shift >= 3)
             alpha0[k][1] = 0x7fffffff;
+        else if (shift <= -30)
+            alpha0[k][1] = 0;
         else {
-            a01.mant <<= 1;
-            shift = 2-shift;
-            if (shift == 0)
-                alpha0[k][1] = a01.mant;
+            shift = 1-shift;
+            if (shift <= 0)
+                alpha0[k][1] = a01.mant * (1<<-shift);
             else {
                 round = 1 << (shift-1);
                 alpha0[k][1] = (a01.mant + round) >> shift;
@@ -308,11 +317,12 @@ static void sbr_hf_inverse_filter(SBRDSPContext *dsp,
         shift = a10.exp;
         if (shift >= 3)
             alpha1[k][0] = 0x7fffffff;
+        else if (shift <= -30)
+            alpha1[k][0] = 0;
         else {
-            a10.mant <<= 1;
-            shift = 2-shift;
-            if (shift == 0)
-                alpha1[k][0] = a10.mant;
+            shift = 1-shift;
+            if (shift <= 0)
+                alpha1[k][0] = a10.mant * (1<<-shift);
             else {
                 round = 1 << (shift-1);
                 alpha1[k][0] = (a10.mant + round) >> shift;
@@ -322,11 +332,12 @@ static void sbr_hf_inverse_filter(SBRDSPContext *dsp,
         shift = a11.exp;
         if (shift >= 3)
             alpha1[k][1] = 0x7fffffff;
+        else if (shift <= -30)
+            alpha1[k][1] = 0;
         else {
-            a11.mant <<= 1;
-            shift = 2-shift;
-            if (shift == 0)
-                alpha1[k][1] = a11.mant;
+            shift = 1-shift;
+            if (shift <= 0)
+                alpha1[k][1] = a11.mant * (1<<-shift);
             else {
                 round = 1 << (shift-1);
                 alpha1[k][1] = (a11.mant + round) >> shift;
@@ -398,7 +409,8 @@ static void sbr_gain_calc(AACContext *ac, SpectralBandReplication *sbr,
         int delta = !((e == e_a[1]) || (e == e_a[0]));
         for (k = 0; k < sbr->n_lim; k++) {
             SoftFloat gain_boost, gain_max;
-            SoftFloat sum[2] = { { 0, 0}, { 0, 0 } };
+            SoftFloat sum[2];
+            sum[0] = sum[1] = FLOAT_0;
             for (m = sbr->f_tablelim[k] - sbr->kx[1]; m < sbr->f_tablelim[k + 1] - sbr->kx[1]; m++) {
                 const SoftFloat temp = av_div_sf(sbr->e_origmapped[e][m],
                                             av_add_sf(FLOAT_1, sbr->q_mapped[e][m]));
@@ -421,6 +433,7 @@ static void sbr_gain_calc(AACContext *ac, SpectralBandReplication *sbr,
                                                 av_add_sf(FLOAT_1, sbr->e_curr[e][m]),
                                                 av_add_sf(FLOAT_1, sbr->q_mapped[e][m]))));
                 }
+                sbr->gain[e][m] = av_add_sf(sbr->gain[e][m], FLOAT_MIN);
             }
             for (m = sbr->f_tablelim[k] - sbr->kx[1]; m < sbr->f_tablelim[k + 1] - sbr->kx[1]; m++) {
                 sum[0] = av_add_sf(sum[0], sbr->e_origmapped[e][m]);
@@ -554,25 +567,39 @@ static void sbr_hf_assemble(int Y1[38][64][2],
                 int idx = indexsine&1;
                 int A = (1-((indexsine+(kx & 1))&2));
                 int B = (A^(-idx)) + idx;
-                int *out = &Y1[i][kx][idx];
-                int shift, round;
+                unsigned *out = &Y1[i][kx][idx];
+                int shift;
+                unsigned round;
 
                 SoftFloat *in  = sbr->s_m[e];
                 for (m = 0; m+1 < m_max; m+=2) {
-                  shift = 22 - in[m  ].exp;
-                  round = 1 << (shift-1);
-                  out[2*m  ] += (in[m  ].mant * A + round) >> shift;
+                    int shift2;
+                    shift = 22 - in[m  ].exp;
+                    shift2= 22 - in[m+1].exp;
+                    if (shift < 1 || shift2 < 1) {
+                        av_log(NULL, AV_LOG_ERROR, "Overflow in sbr_hf_assemble, shift=%d,%d\n", shift, shift2);
+                        return;
+                    }
+                    if (shift < 32) {
+                        round = 1 << (shift-1);
+                        out[2*m  ] += (int)(in[m  ].mant * A + round) >> shift;
+                    }
 
-                  shift = 22 - in[m+1].exp;
-                  round = 1 << (shift-1);
-                  out[2*m+2] += (in[m+1].mant * B + round) >> shift;
+                    if (shift2 < 32) {
+                        round = 1 << (shift2-1);
+                        out[2*m+2] += (int)(in[m+1].mant * B + round) >> shift2;
+                    }
                 }
                 if(m_max&1)
                 {
-                  shift = 22 - in[m  ].exp;
-                  round = 1 << (shift-1);
-
-                  out[2*m  ] += (in[m  ].mant * A + round) >> shift;
+                    shift = 22 - in[m  ].exp;
+                    if (shift < 1) {
+                        av_log(NULL, AV_LOG_ERROR, "Overflow in sbr_hf_assemble, shift=%d\n", shift);
+                        return;
+                    } else if (shift < 32) {
+                        round = 1 << (shift-1);
+                        out[2*m  ] += (int)(in[m  ].mant * A + round) >> shift;
+                    }
                 }
             }
             indexnoise = (indexnoise + m_max) & 0x1ff;

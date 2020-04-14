@@ -20,9 +20,16 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "config.h"
+
+#if CONFIG_ZLIB
+#include <zlib.h>
+#endif
+
 #include "libavutil/avassert.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/internal.h"
 #include "libavutil/intreadwrite.h"
 #include "libavcodec/get_bits.h"
 #include "swf.h"
@@ -54,7 +61,7 @@ static int get_swf_tag(AVIOContext *pb, int *len_ptr)
 }
 
 
-static int swf_probe(AVProbeData *p)
+static int swf_probe(const AVProbeData *p)
 {
     GetBitContext gb;
     int len, xmin, xmax, ymin, ymax;
@@ -71,7 +78,8 @@ static int swf_probe(AVProbeData *p)
         && p->buf[3] <= 20)
         return AVPROBE_SCORE_MAX / 4 + 1;
 
-    init_get_bits8(&gb, p->buf + 3, p->buf_size - 3);
+    if (init_get_bits8(&gb, p->buf + 3, p->buf_size - 3) < 0)
+        return 0;
 
     skip_bits(&gb, 40);
     len = get_bits(&gb, 5);
@@ -87,7 +95,7 @@ static int swf_probe(AVProbeData *p)
     if (p->buf[3] >= 20 || xmax < 16 || ymax < 16)
         return AVPROBE_SCORE_MAX / 4;
 
-    return AVPROBE_SCORE_MAX;
+    return AVPROBE_SCORE_EXTENSION + 1;
 }
 
 #if CONFIG_ZLIB
@@ -111,10 +119,10 @@ retry:
     z->avail_out = buf_size;
 
     ret = inflate(z, Z_NO_FLUSH);
-    if (ret < 0)
-        return AVERROR(EINVAL);
     if (ret == Z_STREAM_END)
         return AVERROR_EOF;
+    if (ret != Z_OK)
+        return AVERROR(EINVAL);
 
     if (buf_size - z->avail_out == 0)
         goto retry;
@@ -144,6 +152,8 @@ static int swf_read_header(AVFormatContext *s)
         swf->zpb->seekable = 0;
         if (inflateInit(&swf->zstream) != Z_OK) {
             av_log(s, AV_LOG_ERROR, "Unable to init zlib context\n");
+            av_freep(&swf->zbuf_in);
+            av_freep(&swf->zbuf_out);
             return AVERROR(EINVAL);
         }
         pb = swf->zpb;
@@ -173,21 +183,21 @@ static AVStream *create_new_audio_stream(AVFormatContext *s, int id, int info)
         return NULL;
     ast->id = id;
     if (info & 1) {
-        ast->codec->channels       = 2;
-        ast->codec->channel_layout = AV_CH_LAYOUT_STEREO;
+        ast->codecpar->channels       = 2;
+        ast->codecpar->channel_layout = AV_CH_LAYOUT_STEREO;
     } else {
-        ast->codec->channels       = 1;
-        ast->codec->channel_layout = AV_CH_LAYOUT_MONO;
+        ast->codecpar->channels       = 1;
+        ast->codecpar->channel_layout = AV_CH_LAYOUT_MONO;
     }
-    ast->codec->codec_type = AVMEDIA_TYPE_AUDIO;
-    ast->codec->codec_id   = ff_codec_get_id(swf_audio_codec_tags, info>>4 & 15);
+    ast->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+    ast->codecpar->codec_id   = ff_codec_get_id(swf_audio_codec_tags, info>>4 & 15);
     ast->need_parsing = AVSTREAM_PARSE_FULL;
     sample_rate_code = info>>2 & 3;
     sample_size_code = info>>1 & 1;
-    if (!sample_size_code && ast->codec->codec_id == AV_CODEC_ID_PCM_S16LE)
-        ast->codec->codec_id = AV_CODEC_ID_PCM_U8;
-    ast->codec->sample_rate = 44100 >> (3 - sample_rate_code);
-    avpriv_set_pts_info(ast, 64, 1, ast->codec->sample_rate);
+    if (!sample_size_code && ast->codecpar->codec_id == AV_CODEC_ID_PCM_S16LE)
+        ast->codecpar->codec_id = AV_CODEC_ID_PCM_U8;
+    ast->codecpar->sample_rate = 44100 >> (3 - sample_rate_code);
+    avpriv_set_pts_info(ast, 64, 1, ast->codecpar->sample_rate);
     return ast;
 }
 
@@ -218,7 +228,7 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             for (i=0; i<s->nb_streams; i++) {
                 st = s->streams[i];
-                if (st->codec->codec_type == AVMEDIA_TYPE_VIDEO && st->id == ch_id)
+                if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && st->id == ch_id)
                     goto skip;
             }
 
@@ -231,8 +241,8 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (!vst)
                 return AVERROR(ENOMEM);
             vst->id = ch_id;
-            vst->codec->codec_type = AVMEDIA_TYPE_VIDEO;
-            vst->codec->codec_id = ff_codec_get_id(ff_swf_codec_tags, avio_r8(pb));
+            vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+            vst->codecpar->codec_id = ff_codec_get_id(ff_swf_codec_tags, avio_r8(pb));
             avpriv_set_pts_info(vst, 16, 256, swf->frame_rate);
             len -= 8;
         } else if (tag == TAG_STREAMHEAD || tag == TAG_STREAMHEAD2) {
@@ -240,7 +250,7 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             for (i=0; i<s->nb_streams; i++) {
                 st = s->streams[i];
-                if (st->codec->codec_type == AVMEDIA_TYPE_AUDIO && st->id == -1)
+                if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && st->id == -1)
                     goto skip;
             }
 
@@ -257,7 +267,7 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             for (i=0; i<s->nb_streams; i++) {
                 st = s->streams[i];
-                if (st->codec->codec_type == AVMEDIA_TYPE_AUDIO && st->id == ch_id)
+                if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && st->id == ch_id)
                     goto skip;
             }
 
@@ -284,7 +294,7 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
             len -= 2;
             for(i=0; i<s->nb_streams; i++) {
                 st = s->streams[i];
-                if (st->codec->codec_type == AVMEDIA_TYPE_VIDEO && st->id == ch_id) {
+                if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && st->id == ch_id) {
                     frame = avio_rl16(pb);
                     len -= 2;
                     if (len <= 0)
@@ -342,7 +352,7 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             out_len = colormapsize * colormapbpp + linesize * height;
 
-            av_dlog(s, "bitmap: ch=%d fmt=%d %dx%d (linesize=%d) len=%d->%ld pal=%d\n",
+            ff_dlog(s, "bitmap: ch=%d fmt=%d %dx%d (linesize=%d) len=%d->%ld pal=%d\n",
                     ch_id, bmp_fmt, width, height, linesize, len, out_len, colormapsize);
 
             zbuf = av_malloc(len);
@@ -360,7 +370,7 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             for (i = 0; i < s->nb_streams; i++) {
                 st = s->streams[i];
-                if (st->codec->codec_id == AV_CODEC_ID_RAWVIDEO && st->id == -3)
+                if (st->codecpar->codec_id == AV_CODEC_ID_RAWVIDEO && st->id == -3)
                     break;
             }
             if (i == s->nb_streams) {
@@ -370,22 +380,27 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
                     goto bitmap_end;
                 }
                 vst->id = -3; /* -3 to avoid clash with video stream and audio stream */
-                vst->codec->codec_type = AVMEDIA_TYPE_VIDEO;
-                vst->codec->codec_id = AV_CODEC_ID_RAWVIDEO;
+                vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+                vst->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
                 avpriv_set_pts_info(vst, 64, 256, swf->frame_rate);
                 st = vst;
             }
 
             if ((res = av_new_packet(pkt, out_len - colormapsize * colormapbpp)) < 0)
                 goto bitmap_end;
-            if (!st->codec->width && !st->codec->height) {
-                st->codec->width  = width;
-                st->codec->height = height;
+            if (!st->codecpar->width && !st->codecpar->height) {
+                st->codecpar->width  = width;
+                st->codecpar->height = height;
             } else {
                 ff_add_param_change(pkt, 0, 0, 0, width, height);
             }
             pkt->pos = pos;
             pkt->stream_index = st->index;
+
+            if (linesize * height > pkt->size) {
+                res = AVERROR_INVALIDDATA;
+                goto bitmap_end;
+            }
 
             switch (bmp_fmt) {
             case 3:
@@ -409,15 +424,11 @@ static int swf_read_packet(AVFormatContext *s, AVPacket *pkt)
             default:
                 av_assert0(0);
             }
-            if (st->codec->pix_fmt != AV_PIX_FMT_NONE && st->codec->pix_fmt != pix_fmt) {
+            if (st->codecpar->format != AV_PIX_FMT_NONE && st->codecpar->format != pix_fmt) {
                 av_log(s, AV_LOG_ERROR, "pixel format change unsupported\n");
             } else
-                st->codec->pix_fmt = pix_fmt;
+                st->codecpar->format = pix_fmt;
 
-            if (linesize * height > pkt->size) {
-                res = AVERROR_INVALIDDATA;
-                goto bitmap_end;
-            }
             memcpy(pkt->data, buf + colormapsize*colormapbpp, linesize * height);
 
             res = pkt->size;
@@ -435,8 +446,8 @@ bitmap_end_skip:
         } else if (tag == TAG_STREAMBLOCK) {
             for (i = 0; i < s->nb_streams; i++) {
                 st = s->streams[i];
-                if (st->codec->codec_type == AVMEDIA_TYPE_AUDIO && st->id == -1) {
-                    if (st->codec->codec_id == AV_CODEC_ID_MP3) {
+                if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && st->id == -1) {
+                    if (st->codecpar->codec_id == AV_CODEC_ID_MP3) {
                         avio_skip(pb, 4);
                         len -= 4;
                         if (len <= 0)
@@ -457,7 +468,7 @@ bitmap_end_skip:
         } else if (tag == TAG_JPEG2) {
             for (i=0; i<s->nb_streams; i++) {
                 st = s->streams[i];
-                if (st->codec->codec_id == AV_CODEC_ID_MJPEG && st->id == -2)
+                if (st->codecpar->codec_id == AV_CODEC_ID_MJPEG && st->id == -2)
                     break;
             }
             if (i == s->nb_streams) {
@@ -465,8 +476,8 @@ bitmap_end_skip:
                 if (!vst)
                     return AVERROR(ENOMEM);
                 vst->id = -2; /* -2 to avoid clash with video stream and audio stream */
-                vst->codec->codec_type = AVMEDIA_TYPE_VIDEO;
-                vst->codec->codec_id = AV_CODEC_ID_MJPEG;
+                vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+                vst->codecpar->codec_id = AV_CODEC_ID_MJPEG;
                 avpriv_set_pts_info(vst, 64, 256, swf->frame_rate);
                 st = vst;
             }
@@ -477,7 +488,6 @@ bitmap_end_skip:
             if ((res = av_new_packet(pkt, len)) < 0)
                 return res;
             if (avio_read(pb, pkt->data, 4) != 4) {
-                av_free_packet(pkt);
                 return AVERROR_INVALIDDATA;
             }
             if (AV_RB32(pkt->data) == 0xffd8ffd9 ||
@@ -494,7 +504,6 @@ bitmap_end_skip:
             }
             if (res != pkt->size) {
                 if (res < 0) {
-                    av_free_packet(pkt);
                     return res;
                 }
                 av_shrink_packet(pkt, res);
@@ -508,7 +517,7 @@ bitmap_end_skip:
         }
     skip:
         if(len<0)
-            av_log(s, AV_LOG_WARNING, "Cliping len %d\n", len);
+            av_log(s, AV_LOG_WARNING, "Clipping len %d\n", len);
         len = FFMAX(0, len);
         avio_skip(pb, len);
     }
@@ -521,7 +530,7 @@ static av_cold int swf_read_close(AVFormatContext *avctx)
     inflateEnd(&s->zstream);
     av_freep(&s->zbuf_in);
     av_freep(&s->zbuf_out);
-    av_freep(&s->zpb);
+    avio_context_free(&s->zpb);
     return 0;
 }
 #endif

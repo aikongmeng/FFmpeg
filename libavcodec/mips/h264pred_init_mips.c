@@ -73,10 +73,7 @@ static av_cold void h264_pred_init_msa(H264PredContext *h, int codec_id,
 
         switch (codec_id) {
         case AV_CODEC_ID_SVQ3:
-            ;
-            break;
         case AV_CODEC_ID_RV40:
-            ;
             break;
         case AV_CODEC_ID_VP7:
         case AV_CODEC_ID_VP8:
@@ -115,23 +112,22 @@ static av_cold void h264_pred_init_mmi(H264PredContext *h, int codec_id,
         h->pred8x8l [TOP_DC_PRED            ] = ff_pred8x8l_top_dc_8_mmi;
         h->pred8x8l [DC_PRED                ] = ff_pred8x8l_dc_8_mmi;
 
+#if ARCH_MIPS64
         switch (codec_id) {
         case AV_CODEC_ID_SVQ3:
             h->pred16x16[PLANE_PRED8x8      ] = ff_pred16x16_plane_svq3_8_mmi;
-            ;
             break;
         case AV_CODEC_ID_RV40:
             h->pred16x16[PLANE_PRED8x8      ] = ff_pred16x16_plane_rv40_8_mmi;
-            ;
             break;
         case AV_CODEC_ID_VP7:
         case AV_CODEC_ID_VP8:
-            ;
             break;
         default:
             h->pred16x16[PLANE_PRED8x8      ] = ff_pred16x16_plane_h264_8_mmi;
             break;
         }
+#endif
 
         if (codec_id == AV_CODEC_ID_SVQ3 || codec_id == AV_CODEC_ID_H264) {
             if (chroma_format_idc == 1) {
@@ -147,10 +143,10 @@ av_cold void ff_h264_pred_init_mips(H264PredContext *h, int codec_id,
                                     int bit_depth,
                                     const int chroma_format_idc)
 {
-#if HAVE_MSA
-    h264_pred_init_msa(h, codec_id, bit_depth, chroma_format_idc);
-#endif  // #if HAVE_MSA
 #if HAVE_MMI
     h264_pred_init_mmi(h, codec_id, bit_depth, chroma_format_idc);
 #endif /* HAVE_MMI */
+#if HAVE_MSA
+    h264_pred_init_msa(h, codec_id, bit_depth, chroma_format_idc);
+#endif  // #if HAVE_MSA
 }

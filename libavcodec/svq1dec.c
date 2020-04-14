@@ -3,8 +3,8 @@
  * ported to MPlayer by Arpi <arpi@thot.banki.hu>
  * ported to libavcodec by Nick Kurshev <nickols_k@mail.ru>
  *
- * Copyright (c) 2002 The Xine Project
- * Copyright (c) 2002 The FFmpeg Project
+ * Copyright (c) 2002 The Xine project
+ * Copyright (c) 2002 The FFmpeg project
  *
  * SVQ1 Encoder (c) 2004 Mike Melanson <melanson@pcisys.net>
  *
@@ -31,6 +31,8 @@
  * For more information of the SVQ1 algorithm, visit:
  *   http://www.pcisys.net/~melanson/codecs/
  */
+
+#include "libavutil/crc.h"
 
 #include "avcodec.h"
 #include "get_bits.h"
@@ -154,7 +156,7 @@ static const uint8_t string_table[256] = {
     n4    = (mean << 16) + mean;
 
 static int svq1_decode_block_intra(GetBitContext *bitbuf, uint8_t *pixels,
-                                   int pitch)
+                                   ptrdiff_t pitch)
 {
     uint32_t bit_cache;
     uint8_t *list[63];
@@ -221,7 +223,7 @@ static int svq1_decode_block_intra(GetBitContext *bitbuf, uint8_t *pixels,
 }
 
 static int svq1_decode_block_non_intra(GetBitContext *bitbuf, uint8_t *pixels,
-                                       int pitch)
+                                       ptrdiff_t pitch)
 {
     uint32_t bit_cache;
     uint8_t *list[63];
@@ -307,7 +309,7 @@ static int svq1_decode_motion_vector(GetBitContext *bitbuf, svq1_pmv *mv,
 }
 
 static void svq1_skip_block(uint8_t *current, uint8_t *previous,
-                            int pitch, int x, int y)
+                            ptrdiff_t pitch, int x, int y)
 {
     uint8_t *src;
     uint8_t *dst;
@@ -325,7 +327,7 @@ static void svq1_skip_block(uint8_t *current, uint8_t *previous,
 
 static int svq1_motion_inter_block(HpelDSPContext *hdsp, GetBitContext *bitbuf,
                                    uint8_t *current, uint8_t *previous,
-                                   int pitch, svq1_pmv *motion, int x, int y,
+                                   ptrdiff_t pitch, svq1_pmv *motion, int x, int y,
                                    int width, int height)
 {
     uint8_t *src;
@@ -368,7 +370,7 @@ static int svq1_motion_inter_block(HpelDSPContext *hdsp, GetBitContext *bitbuf,
 
 static int svq1_motion_inter_4v_block(HpelDSPContext *hdsp, GetBitContext *bitbuf,
                                       uint8_t *current, uint8_t *previous,
-                                      int pitch, svq1_pmv *motion, int x, int y,
+                                      ptrdiff_t pitch, svq1_pmv *motion, int x, int y,
                                       int width, int height)
 {
     uint8_t *src;
@@ -446,7 +448,7 @@ static int svq1_motion_inter_4v_block(HpelDSPContext *hdsp, GetBitContext *bitbu
 static int svq1_decode_delta_block(AVCodecContext *avctx, HpelDSPContext *hdsp,
                                    GetBitContext *bitbuf,
                                    uint8_t *current, uint8_t *previous,
-                                   int pitch, svq1_pmv *motion, int x, int y,
+                                   ptrdiff_t pitch, svq1_pmv *motion, int x, int y,
                                    int width, int height)
 {
     uint32_t block_type;
@@ -546,9 +548,7 @@ static int svq1_decode_frame_header(AVCodecContext *avctx, AVFrame *frame)
         if (s->frame_code == 0x50 || s->frame_code == 0x60) {
             int csum = get_bits(bitbuf, 16);
 
-            csum = ff_svq1_packet_checksum(bitbuf->buffer,
-                                           bitbuf->size_in_bits >> 3,
-                                           csum);
+            csum = av_bswap16(av_crc(av_crc_get_table(AV_CRC_16_CCITT), av_bswap16(csum), bitbuf->buffer, bitbuf->size_in_bits >> 3));
 
             ff_dlog(avctx, "%s checksum (%02x) for packet data\n",
                     (csum == 0) ? "correct" : "incorrect", csum);
@@ -618,9 +618,12 @@ static int svq1_decode_frame(AVCodecContext *avctx, void *data,
     uint8_t *current;
     int result, i, x, y, width, height;
     svq1_pmv *pmv;
+    int ret;
 
     /* initialize bit buffer */
-    init_get_bits8(&s->gb, buf, buf_size);
+    ret = init_get_bits8(&s->gb, buf, buf_size);
+    if (ret < 0)
+        return ret;
 
     /* decode frame header */
     s->frame_code = get_bits(&s->gb, 22);

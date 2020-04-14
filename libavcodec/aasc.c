@@ -1,6 +1,6 @@
 /*
  * Autodesk RLE Decoder
- * Copyright (c) 2005 The FFmpeg Project
+ * Copyright (C) 2005 The FFmpeg project
  *
  * This file is part of FFmpeg.
  *
@@ -91,7 +91,7 @@ static int aasc_decode_frame(AVCodecContext *avctx,
         return AVERROR_INVALIDDATA;
     }
 
-    if ((ret = ff_reget_buffer(avctx, s->frame)) < 0)
+    if ((ret = ff_reget_buffer(avctx, s->frame, 0)) < 0)
         return ret;
 
     compr     = AV_RL32(buf);
@@ -101,7 +101,7 @@ static int aasc_decode_frame(AVCodecContext *avctx,
     switch (avctx->codec_tag) {
     case MKTAG('A', 'A', 'S', '4'):
         bytestream2_init(&s->gb, buf - 4, buf_size + 4);
-        ff_msrle_decode(avctx, (AVPicture*)s->frame, 8, &s->gb);
+        ff_msrle_decode(avctx, s->frame, 8, &s->gb);
         break;
     case MKTAG('A', 'A', 'S', 'C'):
     switch (compr) {
@@ -117,7 +117,7 @@ static int aasc_decode_frame(AVCodecContext *avctx,
         break;
     case 1:
         bytestream2_init(&s->gb, buf, buf_size);
-        ff_msrle_decode(avctx, (AVPicture*)s->frame, 8, &s->gb);
+        ff_msrle_decode(avctx, s->frame, 8, &s->gb);
         break;
     default:
         av_log(avctx, AV_LOG_ERROR, "Unknown compression type %d\n", compr);
@@ -159,4 +159,5 @@ AVCodec ff_aasc_decoder = {
     .close          = aasc_decode_end,
     .decode         = aasc_decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1,
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE,
 };

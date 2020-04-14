@@ -652,7 +652,7 @@ void ff_ac3_process_exponents(AC3EncodeContext *s)
  */
 static void count_frame_bits_fixed(AC3EncodeContext *s)
 {
-    static const int frame_bits_inc[8] = { 0, 0, 2, 2, 2, 4, 2, 4 };
+    static const uint8_t frame_bits_inc[8] = { 0, 0, 2, 2, 2, 4, 2, 4 };
     int blk;
     int frame_bits;
 
@@ -1065,7 +1065,7 @@ static int bit_alloc(AC3EncodeContext *s, int snr_offset)
 {
     int blk, ch;
 
-    snr_offset = (snr_offset - 240) << 2;
+    snr_offset = (snr_offset - 240) * 4;
 
     reset_block_bap(s);
     for (blk = 0; blk < s->num_blocks; blk++) {
@@ -1183,7 +1183,7 @@ static inline int asym_quant(int c, int e, int qbits)
 {
     int m;
 
-    c = (((c << e) >> (24 - qbits)) + 1) >> 1;
+    c = (((c * (1<<e)) >> (24 - qbits)) + 1) >> 1;
     m = (1 << (qbits-1));
     if (c >= m)
         c = m - 1;
@@ -1800,7 +1800,7 @@ static int validate_float_option(float v, const float *v_list, int v_list_size)
             break;
     }
     if (i == v_list_size)
-        return -1;
+        return AVERROR(EINVAL);
 
     return i;
 }
@@ -1993,12 +1993,11 @@ int ff_ac3_validate_metadata(AC3EncodeContext *s)
     /* set bitstream id for alternate bitstream syntax */
     if (!s->eac3 && (opt->extended_bsi_1 || opt->extended_bsi_2)) {
         if (s->bitstream_id > 8 && s->bitstream_id < 11) {
-            static int warn_once = 1;
-            if (warn_once) {
+            if (!s->warned_alternate_bitstream) {
                 av_log(avctx, AV_LOG_WARNING, "alternate bitstream syntax is "
                        "not compatible with reduced samplerates. writing of "
                        "extended bitstream information will be disabled.\n");
-                warn_once = 0;
+                s->warned_alternate_bitstream = 1;
             }
         } else {
             s->bitstream_id = 6;
@@ -2051,7 +2050,8 @@ av_cold int ff_ac3_encode_close(AVCodecContext *avctx)
         av_freep(&block->cpl_coord_mant);
     }
 
-    s->mdct_end(s);
+    if (s->mdct_end)
+        s->mdct_end(s);
 
     return 0;
 }
@@ -2153,8 +2153,9 @@ static av_cold int validate_options(AC3EncodeContext *s)
 
     /* validate bit rate */
     if (s->eac3) {
-        int max_br, min_br, wpf, min_br_dist, min_br_code;
+        int max_br, min_br, wpf, min_br_code;
         int num_blks_code, num_blocks, frame_samples;
+        long long min_br_dist;
 
         /* calculate min/max bitrate */
         /* TODO: More testing with 3 and 2 blocks. All E-AC-3 samples I've
@@ -2184,9 +2185,9 @@ static av_cold int validate_options(AC3EncodeContext *s)
            this is needed for lookup tables for bandwidth and coupling
            parameter selection */
         min_br_code = -1;
-        min_br_dist = INT_MAX;
+        min_br_dist = INT64_MAX;
         for (i = 0; i < 19; i++) {
-            int br_dist = abs(ff_ac3_bitrate_tab[i] * 1000 - avctx->bit_rate);
+            long long br_dist = llabs(ff_ac3_bitrate_tab[i] * 1000 - avctx->bit_rate);
             if (br_dist < min_br_dist) {
                 min_br_dist = br_dist;
                 min_br_code = i;
@@ -2199,10 +2200,11 @@ static av_cold int validate_options(AC3EncodeContext *s)
             wpf--;
         s->frame_size_min = 2 * wpf;
     } else {
-        int best_br = 0, best_code = 0, best_diff = INT_MAX;
+        int best_br = 0, best_code = 0;
+        long long best_diff = INT64_MAX;
         for (i = 0; i < 19; i++) {
             int br   = (ff_ac3_bitrate_tab[i] >> s->bit_alloc.sr_shift) * 1000;
-            int diff = abs(br - avctx->bit_rate);
+            long long diff = llabs(br - avctx->bit_rate);
             if (diff < best_diff) {
                 best_br   = br;
                 best_code = i;
@@ -2429,11 +2431,9 @@ av_cold int ff_ac3_encode_init(AVCodecContext *avctx)
 
     s->eac3 = avctx->codec_id == AV_CODEC_ID_EAC3;
 
-    ff_ac3_common_init();
-
     ret = validate_options(s);
     if (ret)
-        return ret;
+        goto init_fail;
 
     avctx->frame_size = AC3_BLOCK_SIZE * s->num_blocks;
     avctx->initial_padding = AC3_BLOCK_SIZE;

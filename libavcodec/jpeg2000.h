@@ -40,15 +40,15 @@ enum Jpeg2000Markers {
     JPEG2000_SIZ = 0xff51, // image and tile size
     JPEG2000_COD,          // coding style default
     JPEG2000_COC,          // coding style component
-    JPEG2000_TLM = 0xff55, // packed packet headers, tile-part header
-    JPEG2000_PLM = 0xff57, // tile-part lengths
-    JPEG2000_PLT,          // packet length, main header
+    JPEG2000_TLM = 0xff55, // tile-part length, main header
+    JPEG2000_PLM = 0xff57, // packet length, main header
+    JPEG2000_PLT,          // packet length, tile-part header
     JPEG2000_QCD = 0xff5c, // quantization default
     JPEG2000_QCC,          // quantization component
     JPEG2000_RGN,          // region of interest
     JPEG2000_POC,          // progression order change
-    JPEG2000_PPM,          // packet length, tile-part header
-    JPEG2000_PPT,          // packed packet headers, main header
+    JPEG2000_PPM,          // packed packet headers, main header
+    JPEG2000_PPT,          // packed packet headers, tile-part header
     JPEG2000_CRG = 0xff63, // component registration
     JPEG2000_COM,          // comment
     JPEG2000_SOT = 0xff90, // start of tile-part
@@ -165,30 +165,30 @@ typedef struct Jpeg2000Cblk {
     uint8_t ninclpasses; // number coding of passes included in codestream
     uint8_t nonzerobits;
     uint16_t length;
-    uint16_t lengthinc[JPEG2000_MAX_PASSES];
+    uint16_t *lengthinc;
     uint8_t nb_lengthinc;
     uint8_t lblock;
-    uint8_t zero;
-    uint8_t data[8192];
+    uint8_t *data;
+    size_t data_allocated;
     int nb_terminations;
     int nb_terminationsinc;
-    int data_start[JPEG2000_MAX_PASSES];
-    Jpeg2000Pass passes[JPEG2000_MAX_PASSES];
-    uint16_t coord[2][2]; // border coordinates {{x0, x1}, {y0, y1}}
+    int *data_start;
+    Jpeg2000Pass *passes;
+    int coord[2][2]; // border coordinates {{x0, x1}, {y0, y1}}
 } Jpeg2000Cblk; // code block
 
 typedef struct Jpeg2000Prec {
-    uint16_t nb_codeblocks_width;
-    uint16_t nb_codeblocks_height;
+    int nb_codeblocks_width;
+    int nb_codeblocks_height;
     Jpeg2000TgtNode *zerobits;
     Jpeg2000TgtNode *cblkincl;
     Jpeg2000Cblk *cblk;
     int decoded_layers;
-    uint16_t coord[2][2]; // border coordinates {{x0, x1}, {y0, y1}}
+    int coord[2][2]; // border coordinates {{x0, x1}, {y0, y1}}
 } Jpeg2000Prec; // precinct
 
 typedef struct Jpeg2000Band {
-    uint16_t coord[2][2]; // border coordinates {{x0, x1}, {y0, y1}}
+    int coord[2][2]; // border coordinates {{x0, x1}, {y0, y1}}
     uint16_t log2_cblk_width, log2_cblk_height;
     int i_stepsize; // quantization stepsize
     float f_stepsize; // quantization stepsize
@@ -197,8 +197,8 @@ typedef struct Jpeg2000Band {
 
 typedef struct Jpeg2000ResLevel {
     uint8_t nbands;
-    uint16_t coord[2][2]; // border coordinates {{x0, x1}, {y0, y1}}
-    uint16_t num_precincts_x, num_precincts_y; // number of precincts in x/y direction
+    int coord[2][2]; // border coordinates {{x0, x1}, {y0, y1}}
+    int num_precincts_x, num_precincts_y; // number of precincts in x/y direction
     uint8_t log2_prec_width, log2_prec_height; // exponent of precinct size
     Jpeg2000Band *band;
 } Jpeg2000ResLevel; // resolution level
@@ -208,19 +208,19 @@ typedef struct Jpeg2000Component {
     DWTContext dwt;
     float *f_data;
     int *i_data;
-    uint16_t coord[2][2];   // border coordinates {{x0, x1}, {y0, y1}} -- can be reduced with lowres option
-    uint16_t coord_o[2][2]; // border coordinates {{x0, x1}, {y0, y1}} -- original values from jpeg2000 headers
+    int coord[2][2];   // border coordinates {{x0, x1}, {y0, y1}} -- can be reduced with lowres option
+    int coord_o[2][2]; // border coordinates {{x0, x1}, {y0, y1}} -- original values from jpeg2000 headers
 } Jpeg2000Component;
 
 /* misc tools */
 static inline int ff_jpeg2000_ceildivpow2(int a, int b)
 {
-    return -(((int64_t)(-a)) >> b);
+    return -((-(int64_t)a) >> b);
 }
 
 static inline int ff_jpeg2000_ceildiv(int a, int b)
 {
-    return (a + b - 1) / b;
+    return (a + (int64_t)b - 1) / b;
 }
 
 /* TIER-1 routines */

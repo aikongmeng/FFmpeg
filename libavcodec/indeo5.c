@@ -113,7 +113,7 @@ static int decode_gop_header(IVI45DecContext *ctx, AVCodecContext *avctx)
 
     /* check if picture layout was changed and reallocate buffers */
     if (ivi_pic_config_cmp(&pic_conf, &ctx->pic_conf) || ctx->gop_invalid) {
-        result = ff_ivi_init_planes(ctx->planes, &pic_conf, 0);
+        result = ff_ivi_init_planes(avctx, ctx->planes, &pic_conf, 0);
         if (result < 0) {
             av_log(avctx, AV_LOG_ERROR, "Couldn't reallocate color planes!\n");
             return result;
@@ -264,7 +264,7 @@ static int decode_gop_header(IVI45DecContext *ctx, AVCodecContext *avctx)
         }
 
         if (get_bits1(&ctx->gb))
-            skip_bits_long(&ctx->gb, 24); /* skip transparency fill color */
+            skip_bits(&ctx->gb, 24); /* skip transparency fill color */
     }
 
     align_get_bits(&ctx->gb);
@@ -324,6 +324,7 @@ static int decode_pic_hdr(IVI45DecContext *ctx, AVCodecContext *avctx)
     ctx->frame_type      = get_bits(&ctx->gb, 3);
     if (ctx->frame_type >= 5) {
         av_log(avctx, AV_LOG_ERROR, "Invalid frame type: %d \n", ctx->frame_type);
+        ctx->frame_type = FRAMETYPE_INTRA;
         return AVERROR_INVALIDDATA;
     }
 
@@ -347,7 +348,7 @@ static int decode_pic_hdr(IVI45DecContext *ctx, AVCodecContext *avctx)
     if (ctx->frame_type != FRAMETYPE_NULL) {
         ctx->frame_flags = get_bits(&ctx->gb, 8);
 
-        ctx->pic_hdr_size = (ctx->frame_flags & 1) ? get_bits_long(&ctx->gb, 24) : 0;
+        ctx->pic_hdr_size = (ctx->frame_flags & 1) ? get_bits(&ctx->gb, 24) : 0;
 
         ctx->checksum = (ctx->frame_flags & 0x10) ? get_bits(&ctx->gb, 16) : 0;
 
@@ -391,7 +392,7 @@ static int decode_band_hdr(IVI45DecContext *ctx, IVIBandDesc *band,
         return 0;
     }
 
-    band->data_size = (ctx->frame_flags & 0x80) ? get_bits_long(&ctx->gb, 24) : 0;
+    band->data_size = (ctx->frame_flags & 0x80) ? get_bits(&ctx->gb, 24) : 0;
 
     band->inherit_mv     = band_flags & 2;
     band->inherit_qdelta = band_flags & 8;
@@ -641,6 +642,8 @@ static av_cold int decode_init(AVCodecContext *avctx)
     IVI45DecContext  *ctx = avctx->priv_data;
     int             result;
 
+    ctx->gop_invalid = 1;
+
     ff_ivi_init_static_vlc();
 
     /* copy rvmap tables in our context so we can apply changes to them */
@@ -657,7 +660,7 @@ static av_cold int decode_init(AVCodecContext *avctx)
     ctx->pic_conf.tile_height   = avctx->height;
     ctx->pic_conf.luma_bands    = ctx->pic_conf.chroma_bands = 1;
 
-    result = ff_ivi_init_planes(ctx->planes, &ctx->pic_conf, 0);
+    result = ff_ivi_init_planes(avctx, ctx->planes, &ctx->pic_conf, 0);
     if (result) {
         av_log(avctx, AV_LOG_ERROR, "Couldn't allocate color planes!\n");
         return AVERROR_INVALIDDATA;

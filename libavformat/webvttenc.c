@@ -38,7 +38,7 @@ static void webvtt_write_time(AVIOContext *pb, int64_t millisec)
     min -= 60 * hour;
 
     if (hour > 0)
-        avio_printf(pb, "%"PRId64":", hour);
+        avio_printf(pb, "%02"PRId64":", hour);
 
     avio_printf(pb, "%02"PRId64":%02"PRId64".%03"PRId64"", min, sec, millisec);
 }
@@ -46,12 +46,17 @@ static void webvtt_write_time(AVIOContext *pb, int64_t millisec)
 static int webvtt_write_header(AVFormatContext *ctx)
 {
     AVStream     *s = ctx->streams[0];
+    AVCodecParameters *par = ctx->streams[0]->codecpar;
     AVIOContext *pb = ctx->pb;
+
+    if (ctx->nb_streams != 1 || par->codec_id != AV_CODEC_ID_WEBVTT) {
+        av_log(ctx, AV_LOG_ERROR, "Exactly one WebVTT stream is needed.\n");
+        return AVERROR(EINVAL);
+    }
 
     avpriv_set_pts_info(s, 64, 1, 1000);
 
     avio_printf(pb, "WEBVTT\n");
-    avio_flush(pb);
 
     return 0;
 }

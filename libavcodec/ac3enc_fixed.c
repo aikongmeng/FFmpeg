@@ -43,34 +43,6 @@ static const AVClass ac3enc_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-#include "ac3enc_template.c"
-
-
-/**
- * Finalize MDCT and free allocated memory.
- *
- * @param s  AC-3 encoder private context
- */
-av_cold void AC3_NAME(mdct_end)(AC3EncodeContext *s)
-{
-    ff_mdct_end(&s->mdct);
-}
-
-
-/**
- * Initialize MDCT tables.
- *
- * @param s  AC-3 encoder private context
- * @return   0 on success, negative error code on failure
- */
-av_cold int AC3_NAME(mdct_init)(AC3EncodeContext *s)
-{
-    int ret = ff_mdct_init(&s->mdct, 9, 0, -1.0);
-    s->mdct_window = ff_ac3_window;
-    return ret;
-}
-
-
 /*
  * Normalize the input samples to use the maximum available precision.
  * This assumes signed 16-bit input samples.
@@ -135,6 +107,34 @@ static CoefType calc_cpl_coord(CoefSumType energy_ch, CoefSumType energy_cpl)
 }
 
 
+#include "ac3enc_template.c"
+
+
+/**
+ * Finalize MDCT and free allocated memory.
+ *
+ * @param s  AC-3 encoder private context
+ */
+av_cold void ff_ac3_fixed_mdct_end(AC3EncodeContext *s)
+{
+    ff_mdct_end(&s->mdct);
+}
+
+
+/**
+ * Initialize MDCT tables.
+ *
+ * @param s  AC-3 encoder private context
+ * @return   0 on success, negative error code on failure
+ */
+av_cold int ff_ac3_fixed_mdct_init(AC3EncodeContext *s)
+{
+    int ret = ff_mdct_init(&s->mdct, 9, 0, -1.0);
+    s->mdct_window = ff_ac3_window;
+    return ret;
+}
+
+
 static av_cold int ac3_fixed_encode_init(AVCodecContext *avctx)
 {
     AC3EncodeContext *s = avctx->priv_data;
@@ -155,6 +155,7 @@ AVCodec ff_ac3_fixed_encoder = {
     .sample_fmts     = (const enum AVSampleFormat[]){ AV_SAMPLE_FMT_S16P,
                                                       AV_SAMPLE_FMT_NONE },
     .priv_class      = &ac3enc_class,
+    .supported_samplerates = ff_ac3_sample_rate_tab,
     .channel_layouts = ff_ac3_channel_layouts,
     .defaults        = ac3_defaults,
 };

@@ -36,7 +36,7 @@
 
 typedef struct Buf {
     AVFrame *frame;
-    struct Buf        *next;
+    struct Buf *next;
 } Buf;
 
 typedef struct FifoContext {
@@ -53,38 +53,38 @@ typedef struct FifoContext {
 
 static av_cold int init(AVFilterContext *ctx)
 {
-    FifoContext *fifo = ctx->priv;
-    fifo->last = &fifo->root;
+    FifoContext *s = ctx->priv;
+    s->last = &s->root;
 
     return 0;
 }
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
-    FifoContext *fifo = ctx->priv;
+    FifoContext *s = ctx->priv;
     Buf *buf, *tmp;
 
-    for (buf = fifo->root.next; buf; buf = tmp) {
+    for (buf = s->root.next; buf; buf = tmp) {
         tmp = buf->next;
         av_frame_free(&buf->frame);
         av_free(buf);
     }
 
-    av_frame_free(&fifo->out);
+    av_frame_free(&s->out);
 }
 
 static int add_to_queue(AVFilterLink *inlink, AVFrame *frame)
 {
-    FifoContext *fifo = inlink->dst->priv;
+    FifoContext *s = inlink->dst->priv;
 
-    fifo->last->next = av_mallocz(sizeof(Buf));
-    if (!fifo->last->next) {
+    s->last->next = av_mallocz(sizeof(Buf));
+    if (!s->last->next) {
         av_frame_free(&frame);
         return AVERROR(ENOMEM);
     }
 
-    fifo->last = fifo->last->next;
-    fifo->last->frame = frame;
+    s->last = s->last->next;
+    s->last->frame = frame;
 
     return 0;
 }
@@ -104,7 +104,7 @@ static void queue_pop(FifoContext *s)
 static void buffer_offset(AVFilterLink *link, AVFrame *frame,
                           int offset)
 {
-    int nb_channels = av_get_channel_layout_nb_channels(link->channel_layout);
+    int nb_channels = link->channels;
     int planar = av_sample_fmt_is_planar(link->format);
     int planes = planar ? nb_channels : 1;
     int block_align = av_get_bytes_per_sample(link->format) * (planar ? 1 : nb_channels);
@@ -129,7 +129,7 @@ static void buffer_offset(AVFilterLink *link, AVFrame *frame,
 static int calc_ptr_alignment(AVFrame *frame)
 {
     int planes = av_sample_fmt_is_planar(frame->format) ?
-                 av_get_channel_layout_nb_channels(frame->channel_layout) : 1;
+                 frame->channels : 1;
     int min_align = 128;
     int p;
 
@@ -170,7 +170,7 @@ static int return_audio_frame(AVFilterContext *ctx)
             buffer_offset(link, head, link->request_samples);
         }
     } else {
-        int nb_channels = av_get_channel_layout_nb_channels(link->channel_layout);
+        int nb_channels = link->channels;
 
         if (!s->out) {
             s->out = ff_get_audio_buffer(link, link->request_samples);
@@ -201,7 +201,8 @@ static int return_audio_frame(AVFilterContext *ctx)
                     break;
                 } else if (ret < 0)
                     return ret;
-                av_assert0(s->root.next); // If ff_request_frame() succeeded then we should have a frame
+                if (!s->root.next)
+                    return 0;
             }
             head = s->root.next->frame;
 
@@ -228,23 +229,24 @@ static int return_audio_frame(AVFilterContext *ctx)
 
 static int request_frame(AVFilterLink *outlink)
 {
-    FifoContext *fifo = outlink->src->priv;
+    FifoContext *s = outlink->src->priv;
     int ret = 0;
 
-    if (!fifo->root.next) {
+    if (!s->root.next) {
         if ((ret = ff_request_frame(outlink->src->inputs[0])) < 0) {
             if (ret == AVERROR_EOF && outlink->request_samples)
                 return return_audio_frame(outlink->src);
             return ret;
         }
-        av_assert0(fifo->root.next);
+        if (!s->root.next)
+            return 0;
     }
 
     if (outlink->request_samples) {
         return return_audio_frame(outlink->src);
     } else {
-        ret = ff_filter_frame(outlink, fifo->root.next->frame);
-        queue_pop(fifo);
+        ret = ff_filter_frame(outlink, s->root.next->frame);
+        queue_pop(s);
     }
 
     return ret;
@@ -252,9 +254,9 @@ static int request_frame(AVFilterLink *outlink)
 
 static const AVFilterPad avfilter_vf_fifo_inputs[] = {
     {
-        .name             = "default",
-        .type             = AVMEDIA_TYPE_VIDEO,
-        .filter_frame     = add_to_queue,
+        .name         = "default",
+        .type         = AVMEDIA_TYPE_VIDEO,
+        .filter_frame = add_to_queue,
     },
     { NULL }
 };
@@ -269,23 +271,20 @@ static const AVFilterPad avfilter_vf_fifo_outputs[] = {
 };
 
 AVFilter ff_vf_fifo = {
-    .name      = "fifo",
+    .name        = "fifo",
     .description = NULL_IF_CONFIG_SMALL("Buffer input images and send them when they are requested."),
-
-    .init      = init,
-    .uninit    = uninit,
-
-    .priv_size = sizeof(FifoContext),
-
-    .inputs    = avfilter_vf_fifo_inputs,
-    .outputs   = avfilter_vf_fifo_outputs,
+    .init        = init,
+    .uninit      = uninit,
+    .priv_size   = sizeof(FifoContext),
+    .inputs      = avfilter_vf_fifo_inputs,
+    .outputs     = avfilter_vf_fifo_outputs,
 };
 
 static const AVFilterPad avfilter_af_afifo_inputs[] = {
     {
-        .name             = "default",
-        .type             = AVMEDIA_TYPE_AUDIO,
-        .filter_frame     = add_to_queue,
+        .name         = "default",
+        .type         = AVMEDIA_TYPE_AUDIO,
+        .filter_frame = add_to_queue,
     },
     { NULL }
 };
@@ -302,12 +301,9 @@ static const AVFilterPad avfilter_af_afifo_outputs[] = {
 AVFilter ff_af_afifo = {
     .name        = "afifo",
     .description = NULL_IF_CONFIG_SMALL("Buffer input frames and send them when they are requested."),
-
-    .init      = init,
-    .uninit    = uninit,
-
-    .priv_size = sizeof(FifoContext),
-
-    .inputs    = avfilter_af_afifo_inputs,
-    .outputs   = avfilter_af_afifo_outputs,
+    .init        = init,
+    .uninit      = uninit,
+    .priv_size   = sizeof(FifoContext),
+    .inputs      = avfilter_af_afifo_inputs,
+    .outputs     = avfilter_af_afifo_outputs,
 };

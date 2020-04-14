@@ -36,7 +36,7 @@
 #include "libavutil/fixed_dsp.h"
 #include "avcodec.h"
 #if !USE_FIXED
-#include "imdct15.h"
+#include "mdct15.h"
 #endif
 #include "fft.h"
 #include "mpeg4audio.h"
@@ -139,6 +139,8 @@ typedef struct PredictorState {
     AAC_FLOAT var1;
     AAC_FLOAT r0;
     AAC_FLOAT r1;
+    AAC_FLOAT k1;
+    AAC_FLOAT x_est;
 } PredictorState;
 
 #define MAX_PREDICTORS 672
@@ -148,6 +150,8 @@ typedef struct PredictorState {
 #define SCALE_MAX_POS   255    ///< scalefactor index maximum value
 #define SCALE_MAX_DIFF   60    ///< maximum scalefactor difference allowed by standard
 #define SCALE_DIFF_ZERO  60    ///< codebook index corresponding to zero scalefactor indices difference
+
+#define POW_SF2_ZERO    200    ///< ff_aac_pow2sf_tab index corresponding to pow(2, 0);
 
 #define NOISE_PRE       256    ///< preamble for NOISE_BT, put in bitstream with the first noise band
 #define NOISE_PRE_BITS    9    ///< length of preamble
@@ -159,6 +163,7 @@ typedef struct PredictorState {
 typedef struct LongTermPrediction {
     int8_t present;
     int16_t lag;
+    int coef_idx;
     INTFLOAT coef;
     int8_t used[MAX_LTP_LONG_SFB];
 } LongTermPrediction;
@@ -181,6 +186,7 @@ typedef struct IndividualChannelStream {
     int predictor_present;
     int predictor_initialized;
     int predictor_reset_group;
+    int predictor_reset_count[31];  ///< used by encoder to count prediction resets
     uint8_t prediction_used[41];
     uint8_t window_clipping[8]; ///< set if a certain window is near clipping
     float clip_avoidance_factor; ///< set if any window is near clipping to the necessary atennuation factor to avoid it
@@ -195,6 +201,7 @@ typedef struct TemporalNoiseShaping {
     int length[8][4];
     int direction[8][4];
     int order[8][4];
+    int coef_idx[8][4][TNS_MAX_ORDER];
     INTFLOAT coef[8][4][TNS_MAX_ORDER];
 } TemporalNoiseShaping;
 
@@ -243,10 +250,12 @@ typedef struct SingleChannelElement {
     TemporalNoiseShaping tns;
     Pulse pulse;
     enum BandType band_type[128];                   ///< band types
+    enum BandType band_alt[128];                    ///< alternative band type (used by encoder)
     int band_type_run_end[120];                     ///< band type run end points
     INTFLOAT sf[120];                               ///< scalefactors
     int sf_idx[128];                                ///< scalefactor indices (used by encoder)
     uint8_t zeroes[128];                            ///< band is not coded (used by encoder)
+    uint8_t can_pns[128];                           ///< band is allowed to PNS (informative)
     float  is_ener[128];                            ///< Intensity stereo pos (used by encoder)
     float pns_ener[128];                            ///< Noise energy values (used by encoder)
     DECLARE_ALIGNED(32, INTFLOAT, pcoeffs)[1024];   ///< coefficients for IMDCT, pristine
@@ -254,6 +263,8 @@ typedef struct SingleChannelElement {
     DECLARE_ALIGNED(32, INTFLOAT, saved)[1536];     ///< overlap
     DECLARE_ALIGNED(32, INTFLOAT, ret_buf)[2048];   ///< PCM output buffer
     DECLARE_ALIGNED(16, INTFLOAT, ltp_state)[3072]; ///< time signal for LTP
+    DECLARE_ALIGNED(32, AAC_FLOAT, lcoeffs)[1024];  ///< MDCT of LTP coefficients (used by encoder)
+    DECLARE_ALIGNED(32, AAC_FLOAT, prcoeffs)[1024]; ///< Main prediction coefs (used by encoder)
     PredictorState predictor_state[MAX_PREDICTORS];
     INTFLOAT *ret;                                  ///< PCM output
 } SingleChannelElement;
@@ -316,7 +327,9 @@ struct AACContext {
 #if USE_FIXED
     AVFixedDSPContext *fdsp;
 #else
-    IMDCT15Context *mdct480;
+    MDCT15Context *mdct120;
+    MDCT15Context *mdct480;
+    MDCT15Context *mdct960;
     AVFloatDSPContext *fdsp;
 #endif /* USE_FIXED */
     int random_state;
@@ -342,6 +355,9 @@ struct AACContext {
 
     OutputConfiguration oc[2];
     int warned_num_aac_frames;
+    int warned_960_sbr;
+    unsigned warned_71_wide;
+    int warned_gain_control;
 
     /* aacdec functions pointers */
     void (*imdct_and_windowing)(AACContext *ac, SingleChannelElement *sce);
@@ -352,7 +368,7 @@ struct AACContext {
                                    INTFLOAT *in, IndividualChannelStream *ics);
     void (*update_ltp)(AACContext *ac, SingleChannelElement *sce);
     void (*vector_pow43)(int *coefs, int len);
-    void (*subband_scale)(int *dst, int *src, int scale, int offset, int len);
+    void (*subband_scale)(int *dst, int *src, int scale, int offset, int len, void *log_context);
 
 };
 

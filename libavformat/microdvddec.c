@@ -36,7 +36,7 @@ typedef struct {
 } MicroDVDContext;
 
 
-static int microdvd_probe(AVProbeData *p)
+static int microdvd_probe(const AVProbeData *p)
 {
     unsigned char c;
     const uint8_t *ptr = p->buf;
@@ -102,6 +102,8 @@ static int microdvd_read_header(AVFormatContext *s)
         if (!len)
             break;
         line[strcspn(line, "\r\n")] = 0;
+        if (!*p)
+            continue;
         if (i++ < 3) {
             int frame;
             double fps;
@@ -114,11 +116,12 @@ static int microdvd_read_header(AVFormatContext *s)
                 has_real_fps = 1;
                 continue;
             }
-            if (!st->codec->extradata && sscanf(line, "{DEFAULT}{}%c", &c) == 1) {
-                st->codec->extradata = av_strdup(line + 11);
-                if (!st->codec->extradata)
-                    return AVERROR(ENOMEM);
-                st->codec->extradata_size = strlen(st->codec->extradata) + 1;
+            if (!st->codecpar->extradata && sscanf(line, "{DEFAULT}{}%c", &c) == 1) {
+                int ret, size = strlen(line + 11);
+                ret = ff_alloc_extradata(st->codecpar, size);
+                if (ret < 0)
+                    return ret;
+                memcpy(st->codecpar->extradata, line + 11, size);
                 continue;
             }
         }
@@ -141,7 +144,7 @@ static int microdvd_read_header(AVFormatContext *s)
         sub->pts = get_pts(line);
         sub->duration = get_duration(line);
     }
-    ff_subtitles_queue_finalize(&microdvd->q);
+    ff_subtitles_queue_finalize(s, &microdvd->q);
     if (has_real_fps) {
         /* export the FPS info only if set in the file */
         microdvd->frame_rate = pts_info;
@@ -150,8 +153,8 @@ static int microdvd_read_header(AVFormatContext *s)
         pts_info = microdvd->frame_rate;
     }
     avpriv_set_pts_info(st, 64, pts_info.den, pts_info.num);
-    st->codec->codec_type = AVMEDIA_TYPE_SUBTITLE;
-    st->codec->codec_id   = AV_CODEC_ID_MICRODVD;
+    st->codecpar->codec_type = AVMEDIA_TYPE_SUBTITLE;
+    st->codecpar->codec_id   = AV_CODEC_ID_MICRODVD;
     return 0;
 }
 

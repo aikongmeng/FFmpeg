@@ -197,7 +197,7 @@ static int str_to_time(const char *str, int64_t *rtime)
         if (end > cur + 1)
             cur = end;
     }
-    *rtime = (hours * 3600 + minutes * 60 + seconds) * AV_TIME_BASE;
+    *rtime = (hours * 3600LL + minutes * 60LL + seconds) * AV_TIME_BASE;
     return cur - str;
 }
 
@@ -927,7 +927,7 @@ static void expand_timestamps(void *log, struct sbg_script *s)
         }
     }
     if (s->start_ts == AV_NOPTS_VALUE)
-        s->start_ts = s->opt_start_at_first ? s->tseq[0].ts.t : now;
+        s->start_ts = (s->opt_start_at_first && s->tseq) ? s->tseq[0].ts.t : now;
     s->end_ts = s->opt_duration ? s->start_ts + s->opt_duration :
                 AV_NOPTS_VALUE; /* may be overridden later by -E option */
     cur_ts = now;
@@ -1324,10 +1324,10 @@ static int generate_intervals(void *log, struct sbg_script *s, int sample_rate,
     return 0;
 }
 
-static int encode_intervals(struct sbg_script *s, AVCodecContext *avc,
+static int encode_intervals(struct sbg_script *s, AVCodecParameters *par,
                             struct ws_intervals *inter)
 {
-    int i, edata_size = 4;
+    int i, edata_size = 4, ret;
     uint8_t *edata;
 
     for (i = 0; i < inter->nb_inter; i++) {
@@ -1336,9 +1336,9 @@ static int encode_intervals(struct sbg_script *s, AVCodecContext *avc,
         if (edata_size < 0)
             return AVERROR(ENOMEM);
     }
-    if (ff_alloc_extradata(avc, edata_size))
-        return AVERROR(ENOMEM);
-    edata = avc->extradata;
+    if ((ret = ff_alloc_extradata(par, edata_size)) < 0)
+        return ret;
+    edata = par->extradata;
 
 #define ADD_EDATA32(v) do { AV_WL32(edata, (v)); edata += 4; } while(0)
 #define ADD_EDATA64(v) do { AV_WL64(edata, (v)); edata += 8; } while(0)
@@ -1362,12 +1362,12 @@ static int encode_intervals(struct sbg_script *s, AVCodecContext *avc,
                 break;
         }
     }
-    if (edata != avc->extradata + edata_size)
+    if (edata != par->extradata + edata_size)
         return AVERROR_BUG;
     return 0;
 }
 
-static av_cold int sbg_read_probe(AVProbeData *p)
+static av_cold int sbg_read_probe(const AVProbeData *p)
 {
     int r, score;
     struct sbg_script script = { 0 };
@@ -1414,13 +1414,13 @@ static av_cold int sbg_read_header(AVFormatContext *avf)
     st = avformat_new_stream(avf, NULL);
     if (!st)
         return AVERROR(ENOMEM);
-    st->codec->codec_type     = AVMEDIA_TYPE_AUDIO;
-    st->codec->codec_id       = AV_CODEC_ID_FFWAVESYNTH;
-    st->codec->channels       = 2;
-    st->codec->channel_layout = AV_CH_LAYOUT_STEREO;
-    st->codec->sample_rate    = sbg->sample_rate;
-    st->codec->frame_size     = sbg->frame_size;
-    avpriv_set_pts_info(st, 64, 1, st->codec->sample_rate);
+    st->codecpar->codec_type     = AVMEDIA_TYPE_AUDIO;
+    st->codecpar->codec_id       = AV_CODEC_ID_FFWAVESYNTH;
+    st->codecpar->channels       = 2;
+    st->codecpar->channel_layout = AV_CH_LAYOUT_STEREO;
+    st->codecpar->sample_rate    = sbg->sample_rate;
+    st->codecpar->frame_size     = sbg->frame_size;
+    avpriv_set_pts_info(st, 64, 1, st->codecpar->sample_rate);
     st->probe_packets = 0;
     st->start_time    = av_rescale(script.start_ts,
                                    sbg->sample_rate, AV_TIME_BASE);
@@ -1428,7 +1428,7 @@ static av_cold int sbg_read_header(AVFormatContext *avf)
                         av_rescale(script.end_ts - script.start_ts,
                                    sbg->sample_rate, AV_TIME_BASE);
     st->cur_dts       = st->start_time;
-    r = encode_intervals(&script, st->codec, &inter);
+    r = encode_intervals(&script, st->codecpar, &inter);
     if (r < 0)
         goto fail;
 
@@ -1446,16 +1446,17 @@ fail:
 static int sbg_read_packet(AVFormatContext *avf, AVPacket *packet)
 {
     int64_t ts, end_ts;
+    int ret;
 
     ts = avf->streams[0]->cur_dts;
-    end_ts = ts + avf->streams[0]->codec->frame_size;
+    end_ts = ts + avf->streams[0]->codecpar->frame_size;
     if (avf->streams[0]->duration != AV_NOPTS_VALUE)
         end_ts = FFMIN(avf->streams[0]->start_time + avf->streams[0]->duration,
                        end_ts);
     if (end_ts <= ts)
         return AVERROR_EOF;
-    if (av_new_packet(packet, 12) < 0)
-        return AVERROR(ENOMEM);
+    if ((ret = av_new_packet(packet, 12)) < 0)
+        return ret;
     packet->dts = packet->pts = ts;
     packet->duration = end_ts - ts;
     AV_WL64(packet->data + 0, ts);

@@ -28,6 +28,7 @@
 #include <math.h>
 
 #include "libavutil/float_dsp.h"
+#include "libavutil/libm.h"
 #include "avcodec.h"
 #include "sinewin.h"
 #include "fft.h"
@@ -107,7 +108,7 @@ av_cold void ff_atrac3p_init_wave_synth(void)
 
     /* generate amplitude scalefactors table */
     for (i = 0; i < 64; i++)
-        amp_sf_tab[i] = pow(2.0f, ((double)i - 3) / 4.0f);
+        amp_sf_tab[i] = exp2f((i - 3) / 4.0f);
 }
 
 /**
@@ -247,7 +248,7 @@ void ff_atrac3p_generate_tones(Atrac3pChanUnitCtx *ch_unit, AVFloatDSPContext *f
         out[i] += wavreg1[i] + wavreg2[i];
 }
 
-static const int subband_to_powgrp[ATRAC3P_SUBBANDS] = {
+static const uint8_t subband_to_powgrp[ATRAC3P_SUBBANDS] = {
     0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4
 };
 
@@ -410,15 +411,16 @@ static const float pwc_levs[16] = {
 };
 
 /** Map subband number to quant unit number. */
-static const int subband_to_qu[17] = {
+static const uint8_t subband_to_qu[17] = {
     0, 8, 12, 16, 18, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32
 };
 
-void ff_atrac3p_power_compensation(Atrac3pChanUnitCtx *ctx, int ch_index,
-                                   float *sp, int rng_index, int sb)
+void ff_atrac3p_power_compensation(Atrac3pChanUnitCtx *ctx, AVFloatDSPContext *fdsp,
+                                   int ch_index, float *sp, int rng_index, int sb)
 {
     AtracGainInfo *g1, *g2;
-    float pwcsp[ATRAC3P_SUBBAND_SAMPLES], *dst, grp_lev, qu_lev;
+    LOCAL_ALIGNED_32(float, pwcsp, [ATRAC3P_SUBBAND_SAMPLES]);
+    float *dst, grp_lev, qu_lev;
     int i, gain_lev, gcv = 0, qu, nsp;
     int swap_ch = (ctx->unit_type == CH_UNIT_STEREO && ctx->swap_channels[sb]) ? 1 : 0;
 
@@ -455,8 +457,7 @@ void ff_atrac3p_power_compensation(Atrac3pChanUnitCtx *ctx, int ch_index,
         dst = &sp[ff_atrac3p_qu_to_spec_pos[qu]];
         nsp = ff_atrac3p_qu_to_spec_pos[qu + 1] - ff_atrac3p_qu_to_spec_pos[qu];
 
-        for (i = 0; i < nsp; i++)
-            dst[i] += pwcsp[i] * qu_lev;
+        fdsp->vector_fmac_scalar(dst, pwcsp, qu_lev, nsp);
     }
 }
 

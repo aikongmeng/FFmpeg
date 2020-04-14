@@ -144,6 +144,8 @@ static inline av_flatten int get_symbol(RangeCoder *c, uint8_t *state, int is_si
         e= 0;
         while(get_rac(c, state+1 + FFMIN(e,9))){ //1..10
             e++;
+            if (e > 31)
+                return AVERROR_INVALIDDATA;
         }
 
         a= 1;
@@ -473,7 +475,7 @@ static int predictor_calc_error(int *k, int *state, int order, int error)
     {
         int k_value = *k_ptr, state_value = *state_ptr;
         x -= shift_down(k_value * state_value, LATTICE_SHIFT);
-        state_ptr[1] = state_value + shift_down(k_value * x, LATTICE_SHIFT);
+        state_ptr[1] = state_value + shift_down(k_value * (unsigned)x, LATTICE_SHIFT);
     }
 #else
     for (i = order-2; i >= 0; i--)
@@ -842,7 +844,7 @@ static int sonic_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
 
 //    av_log(avctx, AV_LOG_DEBUG, "used bytes: %d\n", (put_bits_count(&pb)+7)/8);
 
-    avpkt->size = ff_rac_terminate(&c);
+    avpkt->size = ff_rac_terminate(&c, 0);
     *got_packet_ptr = 1;
     return 0;
 
@@ -858,6 +860,7 @@ static av_cold int sonic_decode_init(AVCodecContext *avctx)
     SonicContext *s = avctx->priv_data;
     GetBitContext gb;
     int i;
+    int ret;
 
     s->channels = avctx->channels;
     s->samplerate = avctx->sample_rate;
@@ -868,7 +871,9 @@ static av_cold int sonic_decode_init(AVCodecContext *avctx)
         return AVERROR_INVALIDDATA;
     }
 
-    init_get_bits8(&gb, avctx->extradata, avctx->extradata_size);
+    ret = init_get_bits8(&gb, avctx->extradata, avctx->extradata_size);
+    if (ret < 0)
+        return ret;
 
     s->version = get_bits(&gb, 2);
     if (s->version >= 2) {
@@ -924,6 +929,13 @@ static av_cold int sonic_decode_init(AVCodecContext *avctx)
     s->block_align = 2048LL*s->samplerate/(44100*s->downsampling);
     s->frame_size = s->channels*s->block_align*s->downsampling;
 //    avctx->frame_size = s->block_align;
+
+    if (s->num_taps * s->channels > s->frame_size) {
+        av_log(avctx, AV_LOG_ERROR,
+               "number of taps times channels (%d * %d) larger than frame size %d\n",
+               s->num_taps, s->channels, s->frame_size);
+        return AVERROR_INVALIDDATA;
+    }
 
     av_log(avctx, AV_LOG_INFO, "Sonic: ver: %d.%d ls: %d dr: %d taps: %d block: %d frame: %d downsamp: %d\n",
         s->version, s->minor_version, s->lossless, s->decorrelation, s->num_taps, s->block_align, s->frame_size, s->downsampling);

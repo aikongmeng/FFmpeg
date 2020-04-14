@@ -32,12 +32,12 @@
 #define B 2
 #define A 3
 
-typedef struct {
+typedef struct Range {
     double in_min, in_max;
     double out_min, out_max;
 } Range;
 
-typedef struct {
+typedef struct ColorLevelsContext {
     const AVClass *class;
     Range range[4];
     int nb_comp;
@@ -48,7 +48,7 @@ typedef struct {
 } ColorLevelsContext;
 
 #define OFFSET(x) offsetof(ColorLevelsContext, x)
-#define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
+#define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_RUNTIME_PARAM
 static const AVOption colorlevels_options[] = {
     { "rimin", "set input red black point",    OFFSET(range[R].in_min),  AV_OPT_TYPE_DOUBLE, {.dbl=0}, -1, 1, FLAGS },
     { "gimin", "set input green black point",  OFFSET(range[G].in_min),  AV_OPT_TYPE_DOUBLE, {.dbl=0}, -1, 1, FLAGS },
@@ -97,10 +97,72 @@ static int config_input(AVFilterLink *inlink)
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(inlink->format);
 
     s->nb_comp = desc->nb_components;
-    s->bpp = (desc->comp[0].depth_minus1 + 1) >> 3;
+    s->bpp = desc->comp[0].depth >> 3;
     s->step = (av_get_padded_bits_per_pixel(desc) >> 3) / s->bpp;
     s->linesize = inlink->w * s->step;
     ff_fill_rgba_map(s->rgba_map, inlink->format);
+
+    return 0;
+}
+
+struct thread_data {
+    const uint8_t *srcrow;
+    uint8_t *dstrow;
+    int dst_linesize;
+    int src_linesize;
+
+    double coeff;
+    uint8_t offset;
+
+    int h;
+
+    int imin;
+    int omin;
+};
+
+#define LOAD_COMMON\
+    ColorLevelsContext *s = ctx->priv;\
+    const struct thread_data *td = arg;\
+\
+    int process_h = td->h;\
+    const int slice_start = (process_h *  jobnr   ) / nb_jobs;\
+    const int slice_end   = (process_h * (jobnr+1)) / nb_jobs;\
+    int x, y;\
+    const uint8_t *srcrow = td->srcrow;\
+    uint8_t *dstrow = td->dstrow;\
+    const int step = s->step;\
+    const uint8_t offset = td->offset;\
+\
+    int imin = td->imin;\
+    int omin = td->omin;\
+    double coeff = td->coeff;\
+
+static int colorlevel_slice_8(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    LOAD_COMMON
+
+    for (y = slice_start; y < slice_end; y++) {
+        const uint8_t *src = srcrow + y * td->src_linesize;
+        uint8_t *dst = dstrow + y * td->dst_linesize;
+
+        for (x = 0; x < s->linesize; x += step)
+            dst[x + offset] = av_clip_uint8((src[x + offset] - imin) * coeff + omin);
+    }
+
+    return 0;
+}
+
+static int colorlevel_slice_16(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    LOAD_COMMON
+
+    for (y = slice_start; y < slice_end; y++) {
+        const uint16_t *src = (const uint16_t *)(srcrow + y * td->src_linesize);
+        uint16_t *dst = (uint16_t *)(dstrow + y * td->dst_linesize);
+
+        for (x = 0; x < s->linesize; x += step)
+            dst[x + offset] = av_clip_uint16((src[x + offset] - imin) * coeff + omin);
+    }
 
     return 0;
 }
@@ -132,11 +194,12 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
             const uint8_t offset = s->rgba_map[i];
             const uint8_t *srcrow = in->data[0];
             uint8_t *dstrow = out->data[0];
-            int imin = round(r->in_min  * UINT8_MAX);
-            int imax = round(r->in_max  * UINT8_MAX);
-            int omin = round(r->out_min * UINT8_MAX);
-            int omax = round(r->out_max * UINT8_MAX);
+            int imin = lrint(r->in_min  * UINT8_MAX);
+            int imax = lrint(r->in_max  * UINT8_MAX);
+            int omin = lrint(r->out_min * UINT8_MAX);
+            int omax = lrint(r->out_max * UINT8_MAX);
             double coeff;
+            struct thread_data td;
 
             if (imin < 0) {
                 imin = UINT8_MAX;
@@ -162,15 +225,19 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
             srcrow = in->data[0];
             coeff = (omax - omin) / (double)(imax - imin);
-            for (y = 0; y < inlink->h; y++) {
-                const uint8_t *src = srcrow;
-                uint8_t *dst = dstrow;
 
-                for (x = 0; x < s->linesize; x += step)
-                    dst[x + offset] = av_clip_uint8((src[x + offset] - imin) * coeff + omin);
-                dstrow += out->linesize[0];
-                srcrow += in->linesize[0];
-            }
+            td.srcrow        = srcrow;
+            td.dstrow        = dstrow;
+            td.dst_linesize  = out->linesize[0];
+            td.src_linesize  = in->linesize[0];
+            td.coeff         = coeff;
+            td.offset        = offset;
+            td.h             = inlink->h;
+            td.imin          = imin;
+            td.omin          = omin;
+
+            ctx->internal->execute(ctx, colorlevel_slice_8, &td, NULL,
+                                   FFMIN(inlink->h, ff_filter_get_nb_threads(ctx)));
         }
         break;
     case 2:
@@ -179,11 +246,12 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
             const uint8_t offset = s->rgba_map[i];
             const uint8_t *srcrow = in->data[0];
             uint8_t *dstrow = out->data[0];
-            int imin = round(r->in_min  * UINT16_MAX);
-            int imax = round(r->in_max  * UINT16_MAX);
-            int omin = round(r->out_min * UINT16_MAX);
-            int omax = round(r->out_max * UINT16_MAX);
+            int imin = lrint(r->in_min  * UINT16_MAX);
+            int imax = lrint(r->in_max  * UINT16_MAX);
+            int omin = lrint(r->out_min * UINT16_MAX);
+            int omax = lrint(r->out_max * UINT16_MAX);
             double coeff;
+            struct thread_data td;
 
             if (imin < 0) {
                 imin = UINT16_MAX;
@@ -209,15 +277,19 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
             srcrow = in->data[0];
             coeff = (omax - omin) / (double)(imax - imin);
-            for (y = 0; y < inlink->h; y++) {
-                const uint16_t *src = (const uint16_t*)srcrow;
-                uint16_t *dst = (uint16_t *)dstrow;
 
-                for (x = 0; x < s->linesize; x += step)
-                    dst[x + offset] = av_clip_uint16((src[x + offset] - imin) * coeff + omin);
-                dstrow += out->linesize[0];
-                srcrow += in->linesize[0];
-            }
+            td.srcrow        = srcrow;
+            td.dstrow        = dstrow;
+            td.dst_linesize  = out->linesize[0];
+            td.src_linesize  = in->linesize[0];
+            td.coeff         = coeff;
+            td.offset        = offset;
+            td.h             = inlink->h;
+            td.imin          = imin;
+            td.omin          = omin;
+
+            ctx->internal->execute(ctx, colorlevel_slice_16, &td, NULL,
+                                   FFMIN(inlink->h, ff_filter_get_nb_threads(ctx)));
         }
     }
 
@@ -252,5 +324,6 @@ AVFilter ff_vf_colorlevels = {
     .query_formats = query_formats,
     .inputs        = colorlevels_inputs,
     .outputs       = colorlevels_outputs,
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
+    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC | AVFILTER_FLAG_SLICE_THREADS,
+    .process_command = ff_filter_process_command,
 };

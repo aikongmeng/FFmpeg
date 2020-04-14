@@ -142,7 +142,7 @@ static int idct_row(short *in, const int *const tab, int rnd)
 #define TAN3  0xAB0E
 #define SQRT2 0x5A82
 
-#define MULT(c, x, n)  (((c) * (x)) >> (n))
+#define MULT(c, x, n)  ((unsigned)((int)((c) * (unsigned)(x)) >> (n)))
 // 12b version => #define MULT(c,x, n)  ((((c) >> 3) * (x)) >> ((n) - 3))
 // 12b zero-testing version:
 
@@ -318,16 +318,16 @@ void ff_xvid_idct(int16_t *const in)
     }
 }
 
-static void xvid_idct_put(uint8_t *dest, int line_size, int16_t *block)
+static void xvid_idct_put(uint8_t *dest, ptrdiff_t line_size, int16_t *block)
 {
     ff_xvid_idct(block);
-    ff_put_pixels_clamped(block, dest, line_size);
+    ff_put_pixels_clamped_c(block, dest, line_size);
 }
 
-static void xvid_idct_add(uint8_t *dest, int line_size, int16_t *block)
+static void xvid_idct_add(uint8_t *dest, ptrdiff_t line_size, int16_t *block)
 {
     ff_xvid_idct(block);
-    ff_add_pixels_clamped(block, dest, line_size);
+    ff_add_pixels_clamped_c(block, dest, line_size);
 }
 
 av_cold void ff_xvid_idct_init(IDCTDSPContext *c, AVCodecContext *avctx)

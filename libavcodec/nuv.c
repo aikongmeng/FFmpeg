@@ -75,9 +75,12 @@ static const uint8_t fallback_cquant[] = {
  */
 static void copy_frame(AVFrame *f, const uint8_t *src, int width, int height)
 {
-    AVPicture pic;
-    avpicture_fill(&pic, src, AV_PIX_FMT_YUV420P, width, height);
-    av_picture_copy((AVPicture *)f, &pic, AV_PIX_FMT_YUV420P, width, height);
+    uint8_t *src_data[4];
+    int src_linesize[4];
+    av_image_fill_arrays(src_data, src_linesize, src,
+                         f->format, width, height, 1);
+    av_image_copy(f->data, f->linesize, (const uint8_t **)src_data, src_linesize,
+                  f->format, width, height);
 }
 
 /**
@@ -128,10 +131,10 @@ static int codec_reinit(AVCodecContext *avctx, int width, int height,
                      + RTJPEG_HEADER_SIZE;
         if (buf_size > INT_MAX/8)
             return -1;
-        if ((ret = av_image_check_size(height, width, 0, avctx)) < 0)
+        if ((ret = ff_set_dimensions(avctx, width, height)) < 0)
             return ret;
-        avctx->width  = c->width  = width;
-        avctx->height = c->height = height;
+        c->width  = width;
+        c->height = height;
         av_fast_malloc(&c->decomp_buf, &c->decomp_size,
                        buf_size);
         if (!c->decomp_buf) {
@@ -158,6 +161,8 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     int orig_size      = buf_size;
     int keyframe, ret;
     int size_change = 0;
+    int minsize = 0;
+    int flags = 0;
     int result, init_frame = !avctx->frame_number;
     enum {
         NUV_UNCOMPRESSED  = '0',
@@ -176,7 +181,7 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     // codec data (rtjpeg quant tables)
     if (buf[0] == 'D' && buf[1] == 'R') {
         int ret;
-        // skip rest of the frameheader.
+        // Skip the rest of the frame header.
         buf       = &buf[12];
         buf_size -= 12;
         ret       = get_quant(avctx, c, buf, buf_size);
@@ -195,16 +200,38 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
     case NUV_RTJPEG_IN_LZO:
     case NUV_RTJPEG:
         keyframe = !buf[2];
+        if (c->width < 16 || c->height < 16) {
+            return AVERROR_INVALIDDATA;
+        }
         break;
     case NUV_COPY_LAST:
+        flags |= FF_REGET_BUFFER_FLAG_READONLY;
         keyframe = 0;
         break;
     default:
         keyframe = 1;
         break;
     }
+    switch (comptype) {
+    case NUV_UNCOMPRESSED:
+        minsize = c->width * c->height * 3 / 2;
+        break;
+    case NUV_RTJPEG:
+        minsize = c->width/16 * (c->height/16) * 6;
+        break;
+    case NUV_BLACK:
+    case NUV_COPY_LAST:
+    case NUV_LZO:
+    case NUV_RTJPEG_IN_LZO:
+        break;
+    default:
+        av_log(avctx, AV_LOG_ERROR, "unknown compression\n");
+        return AVERROR_INVALIDDATA;
+    }
+    if (buf_size < minsize / 4)
+        return AVERROR_INVALIDDATA;
 retry:
-    // skip rest of the frameheader.
+    // Skip the rest of the frame header.
     buf       = &buf[12];
     buf_size -= 12;
     if (comptype == NUV_RTJPEG_IN_LZO || comptype == NUV_LZO) {
@@ -251,7 +278,7 @@ retry:
         init_frame = 1;
     }
 
-    if ((result = ff_reget_buffer(avctx, c->pic)) < 0)
+    if ((result = ff_reget_buffer(avctx, c->pic, flags)) < 0)
         return result;
     if (init_frame) {
         memset(c->pic->data[0], 0,    avctx->height * c->pic->linesize[0]);
@@ -288,9 +315,6 @@ retry:
     case NUV_COPY_LAST:
         /* nothing more to do here */
         break;
-    default:
-        av_log(avctx, AV_LOG_ERROR, "unknown compression\n");
-        return AVERROR_INVALIDDATA;
     }
 
     if ((result = av_frame_ref(picture, c->pic)) < 0)
@@ -348,4 +372,5 @@ AVCodec ff_nuv_decoder = {
     .close          = decode_end,
     .decode         = decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1,
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

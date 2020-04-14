@@ -27,8 +27,13 @@
  * @author Alex Beregszaszi
  */
 
-#define BITSTREAM_READER_LE
 #include <limits.h>
+
+#include "libavutil/crc.h"
+#include "libavutil/intreadwrite.h"
+#include "libavutil/opt.h"
+
+#define BITSTREAM_READER_LE
 #include "ttadata.h"
 #include "ttadsp.h"
 #include "avcodec.h"
@@ -36,9 +41,6 @@
 #include "thread.h"
 #include "unary.h"
 #include "internal.h"
-#include "libavutil/crc.h"
-#include "libavutil/intreadwrite.h"
-#include "libavutil/opt.h"
 
 #define FORMAT_SIMPLE    1
 #define FORMAT_ENCRYPTED 2
@@ -123,15 +125,19 @@ static av_cold int tta_decode_init(AVCodecContext * avctx)
     TTAContext *s = avctx->priv_data;
     GetBitContext gb;
     int total_frames;
+    int ret;
 
     s->avctx = avctx;
 
-    // 30bytes includes TTA1 header
+    // 22 bytes for a TTA1 header
     if (avctx->extradata_size < 22)
         return AVERROR_INVALIDDATA;
 
     s->crc_table = av_crc_get_table(AV_CRC_32_IEEE_LE);
-    init_get_bits8(&gb, avctx->extradata, avctx->extradata_size);
+    ret = init_get_bits8(&gb, avctx->extradata, avctx->extradata_size);
+    if (ret < 0)
+        return ret;
+
     if (show_bits_long(&gb, 32) == AV_RL32("TTA1")) {
         /* signature */
         skip_bits_long(&gb, 32);
@@ -157,7 +163,7 @@ static av_cold int tta_decode_init(AVCodecContext * avctx)
         s->data_length = get_bits_long(&gb, 32);
         skip_bits_long(&gb, 32); // CRC32 of header
 
-        if (s->channels == 0) {
+        if (s->channels == 0 || s->channels > 16) {
             av_log(avctx, AV_LOG_ERROR, "Invalid number of channels\n");
             return AVERROR_INVALIDDATA;
         } else if (avctx->sample_rate == 0) {
@@ -221,7 +227,7 @@ static int tta_decode_frame(AVCodecContext *avctx, void *data,
     GetBitContext gb;
     int i, ret;
     int cur_chan = 0, framelen = s->frame_length;
-    int32_t *p;
+    uint32_t *p;
 
     if (avctx->err_recognition & AV_EF_CRCCHECK) {
         if (buf_size < 4 ||
@@ -255,7 +261,7 @@ static int tta_decode_frame(AVCodecContext *avctx, void *data,
     }
 
     i = 0;
-    for (p = s->decode_buffer; p < s->decode_buffer + (framelen * s->channels); p++) {
+    for (p = s->decode_buffer; (int32_t*)p < s->decode_buffer + (framelen * s->channels); p++) {
         int32_t *predictor = &s->ch_ctx[cur_chan].predictor;
         TTAFilter *filter = &s->ch_ctx[cur_chan].filter;
         TTARice *rice = &s->ch_ctx[cur_chan].rice;
@@ -279,7 +285,7 @@ static int tta_decode_frame(AVCodecContext *avctx, void *data,
         }
 
         if (k) {
-            if (k > MIN_CACHE_BITS) {
+            if (k > MIN_CACHE_BITS || unary > INT32_MAX >> k) {
                 ret = AVERROR_INVALIDDATA;
                 goto error;
             }
@@ -308,8 +314,8 @@ static int tta_decode_frame(AVCodecContext *avctx, void *data,
         *p = 1 + ((value >> 1) ^ ((value & 1) - 1));
 
         // run hybrid filter
-        s->dsp.ttafilter_process_dec(filter->qm, filter->dx, filter->dl, &filter->error, p,
-                                     filter->shift, filter->round);
+        s->dsp.filter_process(filter->qm, filter->dx, filter->dl, &filter->error, p,
+                              filter->shift, filter->round);
 
         // fixed order prediction
 #define PRED(x, k) (int32_t)((((uint64_t)(x) << (k)) - (x)) >> (k))
@@ -328,7 +334,7 @@ static int tta_decode_frame(AVCodecContext *avctx, void *data,
             // decorrelate in case of multiple channels
             if (s->channels > 1) {
                 int32_t *r = p - 1;
-                for (*p += *r / 2; r > p - s->channels; r--)
+                for (*p += *r / 2; r > (int32_t*)p - s->channels; r--)
                     *r = *(r + 1) - *r;
             }
             cur_chan = 0;
@@ -352,13 +358,13 @@ static int tta_decode_frame(AVCodecContext *avctx, void *data,
     switch (s->bps) {
     case 1: {
         uint8_t *samples = (uint8_t *)frame->data[0];
-        for (p = s->decode_buffer; p < s->decode_buffer + (framelen * s->channels); p++)
+        for (p = s->decode_buffer; (int32_t*)p < s->decode_buffer + (framelen * s->channels); p++)
             *samples++ = *p + 0x80;
         break;
         }
     case 2: {
         int16_t *samples = (int16_t *)frame->data[0];
-        for (p = s->decode_buffer; p < s->decode_buffer + (framelen * s->channels); p++)
+        for (p = s->decode_buffer; (int32_t*)p < s->decode_buffer + (framelen * s->channels); p++)
             *samples++ = *p;
         break;
         }
@@ -366,7 +372,7 @@ static int tta_decode_frame(AVCodecContext *avctx, void *data,
         // shift samples for 24-bit sample format
         int32_t *samples = (int32_t *)frame->data[0];
         for (i = 0; i < framelen * s->channels; i++)
-            *samples++ <<= 8;
+            *samples++ *= 256;
         // reset decode buffer
         s->decode_buffer = NULL;
         break;
@@ -381,13 +387,6 @@ error:
     if (s->bps == 3)
         s->decode_buffer = NULL;
     return ret;
-}
-
-static int init_thread_copy(AVCodecContext *avctx)
-{
-    TTAContext *s = avctx->priv_data;
-    s->avctx = avctx;
-    return allocate_buffers(avctx);
 }
 
 static av_cold int tta_decode_close(AVCodecContext *avctx) {
@@ -424,7 +423,6 @@ AVCodec ff_tta_decoder = {
     .init           = tta_decode_init,
     .close          = tta_decode_close,
     .decode         = tta_decode_frame,
-    .init_thread_copy = ONLY_IF_THREADS_ENABLED(init_thread_copy),
     .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
     .priv_class     = &tta_decoder_class,
 };
