@@ -9,6 +9,7 @@ OBJS-$(CONFIG_HPELDSP)                  += aarch64/hpeldsp_init_aarch64.o
 OBJS-$(CONFIG_IDCTDSP)                  += aarch64/idctdsp_init_aarch64.o
 OBJS-$(CONFIG_MPEGAUDIODSP)             += aarch64/mpegaudiodsp_init.o
 OBJS-$(CONFIG_NEON_CLOBBER_TEST)        += aarch64/neontest.o
+OBJS-$(CONFIG_PIXBLOCKDSP)              += aarch64/pixblockdsp_init_aarch64.o
 OBJS-$(CONFIG_VIDEODSP)                 += aarch64/videodsp_init.o
 OBJS-$(CONFIG_VP8DSP)                   += aarch64/vp8dsp_init_aarch64.o
 
@@ -46,6 +47,7 @@ NEON-OBJS-$(CONFIG_HPELDSP)             += aarch64/hpeldsp_neon.o
 NEON-OBJS-$(CONFIG_IDCTDSP)             += aarch64/simple_idct_neon.o
 NEON-OBJS-$(CONFIG_MDCT)                += aarch64/mdct_neon.o
 NEON-OBJS-$(CONFIG_MPEGAUDIODSP)        += aarch64/mpegaudiodsp_neon.o
+NEON-OBJS-$(CONFIG_PIXBLOCKDSP)         += aarch64/pixblockdsp_neon.o
 NEON-OBJS-$(CONFIG_VP8DSP)              += aarch64/vp8dsp_neon.o
 
 # decoders/encoders
@@ -59,3 +61,6 @@ NEON-OBJS-$(CONFIG_VP9_DECODER)         += aarch64/vp9itxfm_16bpp_neon.o       \
                                            aarch64/vp9lpf_neon.o               \
                                            aarch64/vp9mc_16bpp_neon.o          \
                                            aarch64/vp9mc_neon.o
+NEON-OBJS-$(CONFIG_HEVC_DECODER)        += aarch64/hevcdsp_idct_neon.o         \
+                                           aarch64/hevcdsp_init_aarch64.o      \
+                                           aarch64/hevcdsp_sao_neon.o

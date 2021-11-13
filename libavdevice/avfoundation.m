@@ -28,6 +28,7 @@
 #import <AVFoundation/AVFoundation.h>
 #include <pthread.h>
 
+#include "libavutil/channel_layout.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/opt.h"
 #include "libavutil/avstring.h"
@@ -85,8 +86,6 @@ typedef struct
 
     int             frames_captured;
     int             audio_frames_captured;
-    int64_t         first_pts;
-    int64_t         first_audio_pts;
     pthread_mutex_t frame_lock;
     id              avf_delegate;
     id              avf_audio_delegate;
@@ -99,6 +98,7 @@ typedef struct
     int             capture_raw_data;
     int             drop_late_frames;
     int             video_is_muxed;
+    int             video_is_screen;
 
     int             list_devices;
     int             video_device_index;
@@ -131,7 +131,9 @@ typedef struct
     CMSampleBufferRef         current_audio_frame;
 
     AVCaptureDevice          *observed_device;
+#if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
     AVCaptureDeviceTransportControlsPlaybackMode observed_mode;
+#endif
     int                      observed_quit;
 } AVFContext;
 
@@ -168,6 +170,7 @@ static void unlock_frames(AVFContext* ctx)
         _context = context;
 
         // start observing if a device is set for it
+#if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
         if (_context->observed_device) {
             NSString *keyPath = NSStringFromSelector(@selector(transportControlsPlaybackMode));
             NSKeyValueObservingOptions options = NSKeyValueObservingOptionNew;
@@ -177,14 +180,19 @@ static void unlock_frames(AVFContext* ctx)
                                            options: options
                                            context: _context];
         }
+#endif
     }
     return self;
 }
 
 - (void)dealloc {
     // stop observing if a device is set for it
-    NSString *keyPath = NSStringFromSelector(@selector(transportControlsPlaybackMode));
-    [_context->observed_device removeObserver: self forKeyPath: keyPath];
+#if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
+    if (_context->observed_device) {
+        NSString *keyPath = NSStringFromSelector(@selector(transportControlsPlaybackMode));
+        [_context->observed_device removeObserver: self forKeyPath: keyPath];
+    }
+#endif
     [super dealloc];
 }
 
@@ -193,6 +201,7 @@ static void unlock_frames(AVFContext* ctx)
                         change:(NSDictionary *)change
                        context:(void *)context {
     if (context == _context) {
+#if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
         AVCaptureDeviceTransportControlsPlaybackMode mode =
             [change[NSKeyValueChangeNewKey] integerValue];
 
@@ -202,6 +211,7 @@ static void unlock_frames(AVFContext* ctx)
             }
             _context->observed_mode = mode;
         }
+#endif
     } else {
         [super observeValueForKeyPath: keyPath
                              ofObject: object
@@ -537,14 +547,18 @@ static int add_video_device(AVFormatContext *s, AVCaptureDevice *video_device)
     }
     [ctx->video_output setAlwaysDiscardsLateVideoFrames:ctx->drop_late_frames];
 
+#if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
     // check for transport control support and set observer device if supported
-    int trans_ctrl = [video_device transportControlsSupported];
-    AVCaptureDeviceTransportControlsPlaybackMode trans_mode = [video_device transportControlsPlaybackMode];
+    if (!ctx->video_is_screen) {
+        int trans_ctrl = [video_device transportControlsSupported];
+        AVCaptureDeviceTransportControlsPlaybackMode trans_mode = [video_device transportControlsPlaybackMode];
 
-    if (trans_ctrl) {
-        ctx->observed_mode   = trans_mode;
-        ctx->observed_device = video_device;
+        if (trans_ctrl) {
+            ctx->observed_mode   = trans_mode;
+            ctx->observed_device = video_device;
+        }
     }
+#endif
 
     ctx->avf_delegate = [[AVFFrameReceiver alloc] initWithContext:ctx];
 
@@ -679,6 +693,7 @@ static int get_audio_config(AVFormatContext *s)
     const AudioStreamBasicDescription *basic_desc = CMAudioFormatDescriptionGetStreamBasicDescription(format_desc);
 
     if (!basic_desc) {
+        unlock_frames(ctx);
         av_log(s, AV_LOG_ERROR, "audio format not available\n");
         return 1;
     }
@@ -717,6 +732,7 @@ static int get_audio_config(AVFormatContext *s)
         ctx->audio_packed) {
         stream->codecpar->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S32BE : AV_CODEC_ID_PCM_S32LE;
     } else {
+        unlock_frames(ctx);
         av_log(s, AV_LOG_ERROR, "audio format is not supported\n");
         return 1;
     }
@@ -726,6 +742,7 @@ static int get_audio_config(AVFormatContext *s)
         ctx->audio_buffer_size        = CMBlockBufferGetDataLength(block_buffer);
         ctx->audio_buffer             = av_malloc(ctx->audio_buffer_size);
         if (!ctx->audio_buffer) {
+            unlock_frames(ctx);
             av_log(s, AV_LOG_ERROR, "error allocating audio buffer\n");
             return 1;
         }
@@ -742,7 +759,6 @@ static int get_audio_config(AVFormatContext *s)
 static int avf_read_header(AVFormatContext *s)
 {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    int capture_screen      = 0;
     uint32_t num_screens    = 0;
     AVFContext *ctx         = (AVFContext*)s->priv_data;
     AVCaptureDevice *video_device = nil;
@@ -752,8 +768,6 @@ static int avf_read_header(AVFormatContext *s)
     NSArray *devices_muxed = [AVCaptureDevice devicesWithMediaType:AVMediaTypeMuxed];
 
     ctx->num_video_devices = [devices count] + [devices_muxed count];
-    ctx->first_pts          = av_gettime();
-    ctx->first_audio_pts    = av_gettime();
 
     pthread_mutex_init(&ctx->frame_lock, NULL);
 
@@ -839,7 +853,7 @@ static int avf_read_header(AVFormatContext *s)
             }
 
             video_device = (AVCaptureDevice*) capture_screen_input;
-            capture_screen = 1;
+            ctx->video_is_screen = 1;
 #endif
          } else {
             av_log(ctx, AV_LOG_ERROR, "Invalid device index\n");
@@ -876,7 +890,7 @@ static int avf_read_header(AVFormatContext *s)
                 AVCaptureScreenInput* capture_screen_input = [[[AVCaptureScreenInput alloc] initWithDisplayID:screens[idx]] autorelease];
                 video_device = (AVCaptureDevice*) capture_screen_input;
                 ctx->video_device_index = ctx->num_video_devices + idx;
-                capture_screen = 1;
+                ctx->video_is_screen = 1;
 
                 if (ctx->framerate.num > 0) {
                     capture_screen_input.minFrameDuration = CMTimeMake(ctx->framerate.den, ctx->framerate.num);
@@ -967,7 +981,7 @@ static int avf_read_header(AVFormatContext *s)
 
     /* Unlock device configuration only after the session is started so it
      * does not reset the capture formats */
-    if (!capture_screen) {
+    if (!ctx->video_is_screen) {
         [video_device unlockForConfiguration];
     }
 
@@ -1053,10 +1067,12 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             } else if (block_buffer != nil) {
                 length = (int)CMBlockBufferGetDataLength(block_buffer);
             } else  {
+                unlock_frames(ctx);
                 return AVERROR(EINVAL);
             }
 
             if (av_new_packet(pkt, length) < 0) {
+                unlock_frames(ctx);
                 return AVERROR(EIO);
             }
 
@@ -1083,21 +1099,26 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             CFRelease(ctx->current_frame);
             ctx->current_frame = nil;
 
-            if (status < 0)
+            if (status < 0) {
+                unlock_frames(ctx);
                 return status;
+            }
         } else if (ctx->current_audio_frame != nil) {
             CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(ctx->current_audio_frame);
             int block_buffer_size         = CMBlockBufferGetDataLength(block_buffer);
 
             if (!block_buffer || !block_buffer_size) {
+                unlock_frames(ctx);
                 return AVERROR(EIO);
             }
 
             if (ctx->audio_non_interleaved && block_buffer_size > ctx->audio_buffer_size) {
+                unlock_frames(ctx);
                 return AVERROR_BUFFER_TOO_SMALL;
             }
 
             if (av_new_packet(pkt, block_buffer_size) < 0) {
+                unlock_frames(ctx);
                 return AVERROR(EIO);
             }
 
@@ -1117,6 +1138,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
                 OSStatus ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, ctx->audio_buffer);
                 if (ret != kCMBlockBufferNoErr) {
+                    unlock_frames(ctx);
                     return AVERROR(EIO);
                 }
 
@@ -1128,7 +1150,11 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                     int##bps##_t **src;                                                \
                     int##bps##_t *dest;                                                \
                     src = av_malloc(ctx->audio_channels * sizeof(int##bps##_t*));      \
-                    if (!src) return AVERROR(EIO);                                     \
+                    if (!src) {                                                        \
+                        unlock_frames(ctx);                                            \
+                        return AVERROR(EIO);                                           \
+                    }                                                                  \
+                                                                                       \
                     for (c = 0; c < ctx->audio_channels; c++) {                        \
                         src[c] = ((int##bps##_t*)ctx->audio_buffer) + c * num_samples; \
                     }                                                                  \
@@ -1148,6 +1174,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             } else {
                 OSStatus ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, pkt->data);
                 if (ret != kCMBlockBufferNoErr) {
+                    unlock_frames(ctx);
                     return AVERROR(EIO);
                 }
             }
@@ -1200,7 +1227,7 @@ static const AVClass avf_class = {
     .category   = AV_CLASS_CATEGORY_DEVICE_VIDEO_INPUT,
 };
 
-AVInputFormat ff_avfoundation_demuxer = {
+const AVInputFormat ff_avfoundation_demuxer = {
     .name           = "avfoundation",
     .long_name      = NULL_IF_CONFIG_SMALL("AVFoundation input device"),
     .priv_data_size = sizeof(AVFContext),

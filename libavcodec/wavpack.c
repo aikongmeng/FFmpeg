@@ -1024,13 +1024,12 @@ static int update_thread_context(AVCodecContext *dst, const AVCodecContext *src)
             return ret;
     }
 
-    av_buffer_unref(&fdst->dsd_ref);
     fdst->dsdctx = NULL;
     fdst->dsd_channels = 0;
+    ret = av_buffer_replace(&fdst->dsd_ref, fsrc->dsd_ref);
+    if (ret < 0)
+        return ret;
     if (fsrc->dsd_ref) {
-        fdst->dsd_ref = av_buffer_ref(fsrc->dsd_ref);
-        if (!fdst->dsd_ref)
-            return AVERROR(ENOMEM);
         fdst->dsdctx = (DSDContext*)fdst->dsd_ref->data;
         fdst->dsd_channels = fsrc->dsd_channels;
     }
@@ -1128,6 +1127,9 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         sample_fmt = AV_SAMPLE_FMT_S16P;
     else
         sample_fmt          = AV_SAMPLE_FMT_S32P;
+
+    if (wc->ch_offset && avctx->sample_fmt != sample_fmt)
+        return AVERROR_INVALIDDATA;
 
     bpp            = av_get_bytes_per_sample(sample_fmt);
     orig_bpp       = ((s->frame_flags & 0x03) + 1) << 3;
@@ -1359,7 +1361,10 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                 bytestream2_skip(&gb, ssize);
                 continue;
             }
-            rate_x = 1 << bytestream2_get_byte(&gb);
+            rate_x = bytestream2_get_byte(&gb);
+            if (rate_x > 30)
+                return AVERROR_INVALIDDATA;
+            rate_x = 1 << rate_x;
             dsd_mode = bytestream2_get_byte(&gb);
             if (dsd_mode && dsd_mode != 1 && dsd_mode != 3) {
                 av_log(avctx, AV_LOG_ERROR, "Invalid DSD encoding mode: %d\n",
@@ -1498,9 +1503,13 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                 av_log(avctx, AV_LOG_ERROR, "Custom sample rate missing.\n");
                 return AVERROR_INVALIDDATA;
             }
-            new_samplerate = sample_rate * rate_x;
+            new_samplerate = sample_rate;
         } else
-            new_samplerate = wv_rates[sr] * rate_x;
+            new_samplerate = wv_rates[sr];
+
+        if (new_samplerate * (uint64_t)rate_x > INT_MAX)
+            return AVERROR_INVALIDDATA;
+        new_samplerate *= rate_x;
 
         if (multiblock) {
             if (chan)
@@ -1690,7 +1699,7 @@ error:
     return ret;
 }
 
-AVCodec ff_wavpack_decoder = {
+const AVCodec ff_wavpack_decoder = {
     .name           = "wavpack",
     .long_name      = NULL_IF_CONFIG_SMALL("WavPack"),
     .type           = AVMEDIA_TYPE_AUDIO,
@@ -1702,6 +1711,7 @@ AVCodec ff_wavpack_decoder = {
     .flush          = wavpack_decode_flush,
     .update_thread_context = ONLY_IF_THREADS_ENABLED(update_thread_context),
     .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS |
-                      AV_CODEC_CAP_SLICE_THREADS,
-    .caps_internal  = FF_CODEC_CAP_ALLOCATE_PROGRESS,
+                      AV_CODEC_CAP_SLICE_THREADS | AV_CODEC_CAP_CHANNEL_CONF,
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE | FF_CODEC_CAP_INIT_CLEANUP |
+                      FF_CODEC_CAP_ALLOCATE_PROGRESS,
 };

@@ -33,6 +33,9 @@
 #include "blockdsp.h"
 #include "get_bits.h"
 #include "internal.h"
+#include "aandcttab.h"
+
+#define CBP_VLC_BITS  9
 
 typedef struct MV30Context {
     GetBitContext  gb;
@@ -58,25 +61,6 @@ typedef struct MV30Context {
 
 static VLC cbp_tab;
 
-static const int16_t scale_tab[] = {
-    16384,  22725,  21407,  19266,
-    16384,  12873,   8867,   4520,
-    22725,  31521,  29692,  26722,
-    22725,  17855,  12299,   6270,
-    21407,  29692,  27969,  25172,
-    21407,  16819,  11585,   5906,
-    19266,  26722,  25172,  22654,
-    19266,  15137,  10426,   5315,
-    16384,  22725,  21407,  19266,
-    16384,  12873,   8867,   4520,
-    12873,  17855,  16819,  15137,
-    12873,  10114,   6967,   3552,
-     8867,  12299,  11585,  10426,
-     8867,   6967,   4799,   2446,
-     4520,   6270,   5906,   5315,
-     4520,   3552,   2446,   1247,
-};
-
 static const uint8_t luma_tab[] = {
     12, 12, 15, 19, 25, 34, 40, 48,
     12, 12, 18, 22, 27, 44, 47, 46,
@@ -86,14 +70,6 @@ static const uint8_t luma_tab[] = {
     25, 31, 42, 48, 58, 72, 81, 75,
     38, 46, 54, 61, 71, 84, 88, 85,
     50, 61, 65, 68, 79, 78, 86, 91,
-    12, 12, 16, 18, 20, 30, 40, 45,
-    12, 12, 16, 18, 30, 40, 45, 50,
-    16, 16, 20, 30, 40, 45, 50, 55,
-    18, 18, 35, 40, 45, 50, 55, 60,
-    20, 30, 40, 45, 50, 55, 60, 65,
-    30, 40, 45, 50, 55, 60, 65, 70,
-    40, 45, 50, 55, 60, 65, 70, 75,
-    45, 50, 55, 60, 65, 70, 75, 80,
 };
 
 static const uint8_t chroma_tab[] = {
@@ -105,14 +81,6 @@ static const uint8_t chroma_tab[] = {
     99, 99, 99, 99, 99, 99, 99, 99,
     99, 99, 99, 99, 99, 99, 99, 99,
     99, 99, 99, 99, 99, 99, 99, 99,
-    12, 16, 20, 24, 28, 36, 40, 44,
-    16, 20, 24, 28, 36, 40, 44, 50,
-    20, 24, 28, 36, 40, 44, 50, 60,
-    24, 28, 36, 40, 44, 50, 60, 80,
-    28, 36, 40, 44, 50, 60, 80, 99,
-    36, 40, 44, 50, 60, 80, 99, 99,
-    40, 44, 50, 60, 80, 99, 99, 99,
-    44, 50, 60, 80, 99, 99, 99, 99,
 };
 
 static const uint8_t zigzag[] = {
@@ -132,29 +100,29 @@ static void get_qtable(int16_t *table, int quant, const uint8_t *quant_tab)
 
     for (int i = 0; i < 64; i++) {
         table[i] = av_clip((quant_tab[i] * factor + 0x32) / 100, 1, 0x7fff);
-        table[i] = ((int)scale_tab[i] * (int)table[i] + 0x800) >> 12;
+        table[i] = ((int)ff_aanscales[i] * (int)table[i] + 0x800) >> 12;
     }
 }
 
-static inline void idct_1d(int *blk, int step)
+static inline void idct_1d(unsigned *blk, int step)
 {
-    const int t0 = blk[0 * step] + blk[4 * step];
-    const int t1 = blk[0 * step] - blk[4 * step];
-    const int t2 = blk[2 * step] + blk[6 * step];
-    const int t3 = (((blk[2 * step] - blk[6 * step]) * 362) >> 8) - t2;
-    const int t4 = t0 + t2;
-    const int t5 = t0 - t2;
-    const int t6 = t1 + t3;
-    const int t7 = t1 - t3;
-    const int t8 = blk[5 * step] + blk[3 * step];
-    const int t9 = blk[5 * step] - blk[3 * step];
-    const int tA = blk[1 * step] + blk[7 * step];
-    const int tB = blk[1 * step] - blk[7 * step];
-    const int tC = t8 + tA;
-    const int tD = (tB + t9) * 473 >> 8;
-    const int tE = ((t9 * -669 >> 8) - tC) + tD;
-    const int tF = ((tA - t8) * 362 >> 8) - tE;
-    const int t10 = ((tB * 277 >> 8) - tD) + tF;
+    const unsigned t0 = blk[0 * step] + blk[4 * step];
+    const unsigned t1 = blk[0 * step] - blk[4 * step];
+    const unsigned t2 = blk[2 * step] + blk[6 * step];
+    const unsigned t3 = ((int)((blk[2 * step] - blk[6 * step]) * 362U) >> 8) - t2;
+    const unsigned t4 = t0 + t2;
+    const unsigned t5 = t0 - t2;
+    const unsigned t6 = t1 + t3;
+    const unsigned t7 = t1 - t3;
+    const unsigned t8 = blk[5 * step] + blk[3 * step];
+    const unsigned t9 = blk[5 * step] - blk[3 * step];
+    const unsigned tA = blk[1 * step] + blk[7 * step];
+    const unsigned tB = blk[1 * step] - blk[7 * step];
+    const unsigned tC = t8 + tA;
+    const unsigned tD = (int)((tB + t9) * 473U) >> 8;
+    const unsigned tE = (((int)(t9 * -669U) >> 8) - tC) + tD;
+    const unsigned tF = ((int)((tA - t8) * 362U) >> 8) - tE;
+    const unsigned t10 = (((int)(tB * 277U) >> 8) - tD) + tF;
 
     blk[0 * step] = t4 + tC;
     blk[1 * step] = t6 + tE;
@@ -232,12 +200,12 @@ static void idct_add(uint8_t *dst, int stride,
 
 static inline void idct2_1d(int *blk, int step)
 {
-    const int t0 = blk[0 * step];
-    const int t1 = blk[1 * step];
-    const int t2 = t1 * 473 >> 8;
-    const int t3 = t2 - t1;
-    const int t4 = (t1 * 362 >> 8) - t3;
-    const int t5 = ((t1 * 277 >> 8) - t2) + t4;
+    const unsigned int  t0 = blk[0 * step];
+    const unsigned int t1 = blk[1 * step];
+    const unsigned int t2 = (int)(t1 * 473U) >> 8;
+    const unsigned int t3 = t2 - t1;
+    const unsigned int t4 =  ((int)(t1 * 362U) >> 8) - t3;
+    const unsigned int t5 = (((int)(t1 * 277U) >> 8) - t2) + t4;
 
     blk[0 * step] = t1 + t0;
     blk[1 * step] = t0 + t3;
@@ -339,14 +307,14 @@ static int decode_intra_block(AVCodecContext *avctx, int mode,
     case 1:
         fill = sign_extend(bytestream2_get_ne16(gbyte), 16);
         pfill[0] += fill;
-        block[0] = ((pfill[0] * qtab[0]) >> 5) + 128;
+        block[0] = ((int)((unsigned)pfill[0] * qtab[0]) >> 5) + 128;
         s->bdsp.fill_block_tab[1](dst, block[0], linesize, 8);
         break;
     case 2:
         memset(block, 0, sizeof(*block) * 64);
         fill = sign_extend(bytestream2_get_ne16(gbyte), 16);
         pfill[0] += fill;
-        block[0] = pfill[0] * qtab[0];
+        block[0] = (unsigned)pfill[0] * qtab[0];
         block[1] = sign_extend(bytestream2_get_ne16(gbyte), 16) * qtab[1];
         block[8] = sign_extend(bytestream2_get_ne16(gbyte), 16) * qtab[8];
         block[9] = sign_extend(bytestream2_get_ne16(gbyte), 16) * qtab[9];
@@ -355,7 +323,7 @@ static int decode_intra_block(AVCodecContext *avctx, int mode,
     case 3:
         fill = sign_extend(bytestream2_get_ne16(gbyte), 16);
         pfill[0] += fill;
-        block[0] = pfill[0] * qtab[0];
+        block[0] = (unsigned)pfill[0] * qtab[0];
         for (int i = 1; i < 64; i++)
             block[zigzag[i]] = sign_extend(bytestream2_get_ne16(gbyte), 16) * qtab[zigzag[i]];
         idct_put(dst, linesize, block);
@@ -380,14 +348,14 @@ static int decode_inter_block(AVCodecContext *avctx, int mode,
     case 1:
         fill = sign_extend(bytestream2_get_ne16(gbyte), 16);
         pfill[0] += fill;
-        block[0] = (pfill[0] * qtab[0]) >> 5;
+        block[0] = (int)((unsigned)pfill[0] * qtab[0]) >> 5;
         update_inter_block(dst, linesize, src, in_linesize, block[0]);
         break;
     case 2:
         memset(block, 0, sizeof(*block) * 64);
         fill = sign_extend(bytestream2_get_ne16(gbyte), 16);
         pfill[0] += fill;
-        block[0] = pfill[0] * qtab[0];
+        block[0] = (unsigned)pfill[0] * qtab[0];
         block[1] = sign_extend(bytestream2_get_ne16(gbyte), 16) * qtab[1];
         block[8] = sign_extend(bytestream2_get_ne16(gbyte), 16) * qtab[8];
         block[9] = sign_extend(bytestream2_get_ne16(gbyte), 16) * qtab[9];
@@ -396,7 +364,7 @@ static int decode_inter_block(AVCodecContext *avctx, int mode,
     case 3:
         fill = sign_extend(bytestream2_get_ne16(gbyte), 16);
         pfill[0] += fill;
-        block[0] = pfill[0] * qtab[0];
+        block[0] = (unsigned)pfill[0] * qtab[0];
         for (int i = 1; i < 64; i++)
             block[zigzag[i]] = sign_extend(bytestream2_get_ne16(gbyte), 16) * qtab[zigzag[i]];
         idct_add(dst, linesize, src, in_linesize, block);
@@ -411,10 +379,7 @@ static int decode_coeffs(GetBitContext *gb, int16_t *coeffs, int nb_codes)
     memset(coeffs, 0, nb_codes * sizeof(*coeffs));
 
     for (int i = 0; i < nb_codes;) {
-        int value = get_vlc2(gb, cbp_tab.table, cbp_tab.bits, 1);
-
-        if (value < 0)
-            return AVERROR_INVALIDDATA;
+        int value = get_vlc2(gb, cbp_tab.table, CBP_VLC_BITS, 1);
 
         if (value > 0) {
             int x = get_bits(gb, value);
@@ -444,6 +409,9 @@ static int decode_intra(AVCodecContext *avctx, GetBitContext *gb, AVFrame *frame
     int ret;
 
     mgb = *gb;
+    if (get_bits_left(gb) < s->mode_size * 8)
+        return AVERROR_INVALIDDATA;
+
     skip_bits_long(gb, s->mode_size * 8);
 
     linesize[0] = frame->linesize[0];
@@ -455,7 +423,7 @@ static int decode_intra(AVCodecContext *avctx, GetBitContext *gb, AVFrame *frame
 
     for (int y = 0; y < avctx->height; y += 16) {
         GetByteContext gbyte;
-        int pfill[3][1] = { 0 };
+        int pfill[3][1] = { {0} };
         int nb_codes = get_bits(gb, 16);
 
         av_fast_padded_malloc(&s->coeffs, &s->coeffs_size, nb_codes * sizeof(*s->coeffs));
@@ -538,7 +506,7 @@ static int decode_inter(AVCodecContext *avctx, GetBitContext *gb,
 
     for (int y = 0; y < avctx->height; y += 16) {
         GetByteContext gbyte;
-        int pfill[3][1] = { 0 };
+        int pfill[3][1] = { {0} };
         int nb_codes = get_bits(gb, 16);
 
         skip_bits(gb, 8);
@@ -562,8 +530,13 @@ static int decode_inter(AVCodecContext *avctx, GetBitContext *gb,
         for (int x = 0; x < avctx->width; x += 16) {
             if (cnt >= 4)
                 cnt = 0;
-            if (cnt == 0)
+            if (cnt == 0) {
+                if (get_bits_left(&mask) < 8) {
+                    ret = AVERROR_INVALIDDATA;
+                    goto fail;
+                }
                 flags = get_bits(&mask, 8);
+            }
 
             dst[0] = frame->data[0] + linesize[0] * y + x;
             dst[1] = frame->data[0] + linesize[0] * y + x + 8;
@@ -579,8 +552,8 @@ static int decode_inter(AVCodecContext *avctx, GetBitContext *gb,
                 int px = x + mv_x;
                 int py = y + mv_y;
 
-                if (px < 0 || px >= avctx->width ||
-                    py < 0 || py >= avctx->height)
+                if (px < 0 || px > FFALIGN(avctx->width , 16) - 16 ||
+                    py < 0 || py > FFALIGN(avctx->height, 16) - 16)
                     return AVERROR_INVALIDDATA;
 
                 src[0] = prev->data[0] + in_linesize[0] * py + px;
@@ -680,18 +653,14 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     return avpkt->size;
 }
 
-static const uint16_t cbp_codes[] = {
-    0, 1, 4, 5, 6, 0xE, 0x1E, 0x3E, 0x7E, 0xFE, 0x1FE, 0x1FF,
-};
-
 static const uint8_t cbp_bits[] = {
     2, 2, 3, 3, 3, 4, 5, 6, 7, 8, 9, 9,
 };
 
 static av_cold void init_static_data(void)
 {
-    INIT_VLC_SPARSE_STATIC(&cbp_tab, 9, FF_ARRAY_ELEMS(cbp_bits),
-                           cbp_bits, 1, 1, cbp_codes, 2, 2, NULL, 0, 0, 512);
+    INIT_VLC_STATIC_FROM_LENGTHS(&cbp_tab, CBP_VLC_BITS, FF_ARRAY_ELEMS(cbp_bits),
+                                 cbp_bits, 1, NULL, 0, 0, 0, 0, 1 << CBP_VLC_BITS);
 }
 
 static av_cold int decode_init(AVCodecContext *avctx)
@@ -733,7 +702,7 @@ static av_cold int decode_close(AVCodecContext *avctx)
     return 0;
 }
 
-AVCodec ff_mv30_decoder = {
+const AVCodec ff_mv30_decoder = {
     .name             = "mv30",
     .long_name        = NULL_IF_CONFIG_SMALL("MidiVid 3.0"),
     .type             = AVMEDIA_TYPE_VIDEO,

@@ -190,6 +190,9 @@ static int cdtoons_decode_frame(AVCodecContext *avctx, void *data,
     palette_set        = bytestream_get_byte(&buf);
     buf               += 5;
 
+    if (sprite_offset > buf_size)
+        return AVERROR_INVALIDDATA;
+
     /* read new sprites introduced in this frame */
     buf = avpkt->data + sprite_offset;
     while (sprite_count--) {
@@ -439,7 +442,7 @@ static av_cold int cdtoons_decode_end(AVCodecContext *avctx)
     return 0;
 }
 
-AVCodec ff_cdtoons_decoder = {
+const AVCodec ff_cdtoons_decoder = {
     .name           = "cdtoons",
     .long_name      = NULL_IF_CONFIG_SMALL("CDToons video"),
     .type           = AVMEDIA_TYPE_VIDEO,
@@ -450,4 +453,5 @@ AVCodec ff_cdtoons_decoder = {
     .decode         = cdtoons_decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1,
     .flush          = cdtoons_flush,
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE,
 };

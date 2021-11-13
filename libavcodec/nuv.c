@@ -126,7 +126,7 @@ static int codec_reinit(AVCodecContext *avctx, int width, int height,
         get_quant_quality(c, quality);
     if (width != c->width || height != c->height) {
         // also reserve space for a possible additional header
-        int buf_size = height * width * 3 / 2
+        int64_t buf_size = height * (int64_t)width * 3 / 2
                      + FFMAX(AV_LZO_OUTPUT_PADDING, AV_INPUT_BUFFER_PADDING_SIZE)
                      + RTJPEG_HEADER_SIZE;
         if (buf_size > INT_MAX/8)
@@ -362,7 +362,7 @@ static av_cold int decode_end(AVCodecContext *avctx)
     return 0;
 }
 
-AVCodec ff_nuv_decoder = {
+const AVCodec ff_nuv_decoder = {
     .name           = "nuv",
     .long_name      = NULL_IF_CONFIG_SMALL("NuppelVideo/RTJPEG"),
     .type           = AVMEDIA_TYPE_VIDEO,
@@ -372,5 +372,5 @@ AVCodec ff_nuv_decoder = {
     .close          = decode_end,
     .decode         = decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1,
-    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE | FF_CODEC_CAP_INIT_CLEANUP,
 };

@@ -24,9 +24,10 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 
-#include "avcodec.h"
 #include "bsf.h"
+#include "bsf_internal.h"
 #include "bytestream.h"
+#include "defs.h"
 #include "hevc.h"
 
 #define MIN_HEVCC_LENGTH 23
@@ -141,8 +142,17 @@ static int hevc_mp4toannexb_filter(AVBSFContext *ctx, AVPacket *out)
         int      nalu_type;
         int is_irap, add_extradata, extra_size, prev_size;
 
+        if (bytestream2_get_bytes_left(&gb) < s->length_size) {
+            ret = AVERROR_INVALIDDATA;
+            goto fail;
+        }
         for (i = 0; i < s->length_size; i++)
             nalu_size = (nalu_size << 8) | bytestream2_get_byte(&gb);
+
+        if (nalu_size < 2 || nalu_size > bytestream2_get_bytes_left(&gb)) {
+            ret = AVERROR_INVALIDDATA;
+            goto fail;
+        }
 
         nalu_type = (bytestream2_peek_byte(&gb) >> 1) & 0x3f;
 

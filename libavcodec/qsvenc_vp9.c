@@ -92,7 +92,7 @@ static const AVCodecDefault qsv_enc_defaults[] = {
     { NULL },
 };
 
-AVCodec ff_vp9_qsv_encoder = {
+const AVCodec ff_vp9_qsv_encoder = {
     .name           = "vp9_qsv",
     .long_name      = NULL_IF_CONFIG_SMALL("VP9 video (Intel Quick Sync Video acceleration)"),
     .priv_data_size = sizeof(QSVVP9EncContext),
@@ -110,4 +110,5 @@ AVCodec ff_vp9_qsv_encoder = {
     .defaults       = qsv_enc_defaults,
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
     .wrapper_name   = "qsv",
+    .hw_configs     = ff_qsv_enc_hw_configs,
 };

@@ -59,8 +59,10 @@
 #define GET_LIST_HEADER() \
     fourcc_tag = avio_rl32(pb); \
     size       = avio_rl32(pb); \
-    if (fourcc_tag != LIST_TAG) \
-        return AVERROR_INVALIDDATA; \
+    if (fourcc_tag != LIST_TAG) { \
+        ret = AVERROR_INVALIDDATA; \
+        goto fail; \
+    } \
     fourcc_tag = avio_rl32(pb);
 
 typedef struct AudioTrack {
@@ -210,12 +212,13 @@ static int fourxm_read_header(AVFormatContext *s)
     unsigned int size;
     int header_size;
     FourxmDemuxContext *fourxm = s->priv_data;
-    unsigned char *header;
+    unsigned char *header = NULL;
     int i, ret;
 
     fourxm->track_count = 0;
     fourxm->tracks      = NULL;
     fourxm->fps         = (AVRational){1,1};
+    fourxm->video_stream_index = -1;
 
     /* skip the first 3 32-bit numbers */
     avio_skip(pb, 12);
@@ -280,7 +283,6 @@ static int fourxm_read_header(AVFormatContext *s)
 
     return 0;
 fail:
-    av_freep(&fourxm->tracks);
     av_free(header);
     return ret;
 }
@@ -296,7 +298,7 @@ static int fourxm_read_packet(AVFormatContext *s,
     unsigned int track_number;
     int packet_read = 0;
     unsigned char header[8];
-    int audio_frame_count;
+    int64_t audio_frame_count;
 
     while (!packet_read) {
         if ((ret = avio_read(s->pb, header, 8)) < 0)
@@ -323,6 +325,8 @@ static int fourxm_read_packet(AVFormatContext *s,
             /* allocate 8 more bytes than 'size' to account for fourcc
              * and size */
             if (size > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE - 8)
+                return AVERROR_INVALIDDATA;
+            if (fourxm->video_stream_index < 0)
                 return AVERROR_INVALIDDATA;
             if ((ret = av_new_packet(pkt, size + 8)) < 0)
                 return ret;
@@ -388,10 +392,11 @@ static int fourxm_read_close(AVFormatContext *s)
     return 0;
 }
 
-AVInputFormat ff_fourxm_demuxer = {
+const AVInputFormat ff_fourxm_demuxer = {
     .name           = "4xm",
     .long_name      = NULL_IF_CONFIG_SMALL("4X Technologies"),
     .priv_data_size = sizeof(FourxmDemuxContext),
+    .flags_internal = FF_FMT_INIT_CLEANUP,
     .read_probe     = fourxm_probe,
     .read_header    = fourxm_read_header,
     .read_packet    = fourxm_read_packet,

@@ -641,7 +641,6 @@ static int teletext_decode_frame(AVCodecContext *avctx, void *data, int *got_sub
     TeletextContext *ctx = avctx->priv_data;
     AVSubtitle      *sub = data;
     int             ret = 0;
-    int j;
 
     if (!ctx->vbi) {
         if (!(ctx->vbi = vbi_decoder_new()))
@@ -701,14 +700,6 @@ static int teletext_decode_frame(AVCodecContext *avctx, void *data, int *got_sub
             if (sub->rects) {
                 sub->num_rects = 1;
                 sub->rects[0] = ctx->pages->sub_rect;
-#if FF_API_AVPICTURE
-FF_DISABLE_DEPRECATION_WARNINGS
-                for (j = 0; j < 4; j++) {
-                    sub->rects[0]->pict.data[j] = sub->rects[0]->data[j];
-                    sub->rects[0]->pict.linesize[j] = sub->rects[0]->linesize[j];
-                }
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
             } else {
                 ret = AVERROR(ENOMEM);
             }
@@ -797,7 +788,7 @@ static void teletext_flush(AVCodecContext *avctx)
 #define SD AV_OPT_FLAG_SUBTITLE_PARAM | AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
     {"txt_page",        "page numbers to decode, subtitle for subtitles, * for all", OFFSET(pgno),   AV_OPT_TYPE_STRING, {.str = "*"},      0, 0,        SD},
-    {"txt_default_region", "default G0 character set used for decoding",     OFFSET(default_region), AV_OPT_TYPE_INT,    {.i64 = -1},      -1, 80,       SD},
+    {"txt_default_region", "default G0 character set used for decoding",     OFFSET(default_region), AV_OPT_TYPE_INT,    {.i64 = -1},      -1, 87,       SD},
     {"txt_chop_top",    "discards the top teletext line",                    OFFSET(chop_top),       AV_OPT_TYPE_INT,    {.i64 = 1},        0, 1,        SD},
     {"txt_format",      "format of the subtitles (bitmap or text or ass)",   OFFSET(format_id),      AV_OPT_TYPE_INT,    {.i64 = 0},        0, 2,        SD,  "txt_format"},
     {"bitmap",          NULL,                                                0,                      AV_OPT_TYPE_CONST,  {.i64 = 0},        0, 0,        SD,  "txt_format"},
@@ -819,7 +810,7 @@ static const AVClass teletext_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-AVCodec ff_libzvbi_teletext_decoder = {
+const AVCodec ff_libzvbi_teletext_decoder = {
     .name      = "libzvbi_teletextdec",
     .long_name = NULL_IF_CONFIG_SMALL("Libzvbi DVB teletext decoder"),
     .type      = AVMEDIA_TYPE_SUBTITLE,

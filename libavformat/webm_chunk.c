@@ -24,23 +24,14 @@
  * chunk, followed by data chunks where each Cluster is written out as a Chunk.
  */
 
-#include <float.h>
-#include <time.h>
-
 #include "avformat.h"
 #include "avio.h"
 #include "avio_internal.h"
 #include "internal.h"
 
-#include "libavutil/avassert.h"
 #include "libavutil/log.h"
 #include "libavutil/opt.h"
-#include "libavutil/avstring.h"
-#include "libavutil/parseutils.h"
 #include "libavutil/mathematics.h"
-#include "libavutil/time.h"
-#include "libavutil/time_internal.h"
-#include "libavutil/timestamp.h"
 
 #define MAX_FILENAME_SIZE 1024
 
@@ -53,12 +44,13 @@ typedef struct WebMChunkContext {
     uint64_t duration_written;
     int64_t prev_pts;
     AVFormatContext *avf;
+    int header_written;
 } WebMChunkContext;
 
 static int webm_chunk_init(AVFormatContext *s)
 {
     WebMChunkContext *wc = s->priv_data;
-    ff_const59 AVOutputFormat *oformat;
+    const AVOutputFormat *oformat;
     AVFormatContext *oc;
     AVStream *st, *ost = s->streams[0];
     AVDictionary *dict = NULL;
@@ -101,14 +93,17 @@ static int webm_chunk_init(AVFormatContext *s)
     if (!(st = avformat_new_stream(oc, NULL)))
         return AVERROR(ENOMEM);
 
-    if ((ret = avcodec_parameters_copy(st->codecpar, ost->codecpar)) < 0 ||
-        (ret = av_dict_copy(&st->metadata, ost->metadata, 0))        < 0)
+    if ((ret = ff_stream_encode_params_copy(st, ost)) < 0)
         return ret;
 
-    st->sample_aspect_ratio = ost->sample_aspect_ratio;
-    st->disposition         = ost->disposition;
-    avpriv_set_pts_info(st, ost->pts_wrap_bits, ost->time_base.num,
-                                                ost->time_base.den);
+    if (wc->http_method)
+        if ((ret = av_dict_set(&dict, "method", wc->http_method, 0)) < 0)
+            return ret;
+    ret = s->io_open(s, &oc->pb, oc->url, AVIO_FLAG_WRITE, &dict);
+    av_dict_free(&dict);
+    if (ret < 0)
+        return ret;
+    oc->pb->seekable = 0;
 
     if ((ret = av_dict_set_int(&dict, "dash", 1, 0))   < 0 ||
         (ret = av_dict_set_int(&dict, "cluster_time_limit",
@@ -130,8 +125,8 @@ fail:
     // This ensures that the timestamps will already be properly shifted
     // when the packets arrive here, so we don't need to shift again.
     s->avoid_negative_ts  = oc->avoid_negative_ts;
-    s->internal->avoid_negative_ts_use_pts =
-        oc->internal->avoid_negative_ts_use_pts;
+    ffformatcontext(s)->avoid_negative_ts_use_pts =
+        ffformatcontext(oc)->avoid_negative_ts_use_pts;
     oc->avoid_negative_ts = 0;
 
     return 0;
@@ -156,19 +151,10 @@ static int webm_chunk_write_header(AVFormatContext *s)
     WebMChunkContext *wc = s->priv_data;
     AVFormatContext *oc = wc->avf;
     int ret;
-    AVDictionary *options = NULL;
 
-    if (wc->http_method)
-        if ((ret = av_dict_set(&options, "method", wc->http_method, 0)) < 0)
-            return ret;
-    ret = s->io_open(s, &oc->pb, oc->url, AVIO_FLAG_WRITE, &options);
-    av_dict_free(&options);
-    if (ret < 0)
-        return ret;
-
-    oc->pb->seekable = 0;
     ret = avformat_write_header(oc, NULL);
     ff_format_io_close(s, &oc->pb);
+    wc->header_written = 1;
     if (ret < 0)
         return ret;
     return 0;
@@ -279,7 +265,10 @@ static void webm_chunk_deinit(AVFormatContext *s)
     if (!wc->avf)
         return;
 
-    ffio_free_dyn_buf(&wc->avf->pb);
+    if (wc->header_written)
+        ffio_free_dyn_buf(&wc->avf->pb);
+    else
+        ff_format_io_close(s, &wc->avf->pb);
     avformat_free_context(wc->avf);
     wc->avf = NULL;
 }
@@ -293,7 +282,6 @@ static const AVOption options[] = {
     { NULL },
 };
 
-#if CONFIG_WEBM_CHUNK_MUXER
 static const AVClass webm_chunk_class = {
     .class_name = "WebM Chunk Muxer",
     .item_name  = av_default_item_name,
@@ -301,7 +289,7 @@ static const AVClass webm_chunk_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-AVOutputFormat ff_webm_chunk_muxer = {
+const AVOutputFormat ff_webm_chunk_muxer = {
     .name           = "webm_chunk",
     .long_name      = NULL_IF_CONFIG_SMALL("WebM Chunk Muxer"),
     .mime_type      = "video/webm",
@@ -316,4 +304,3 @@ AVOutputFormat ff_webm_chunk_muxer = {
     .deinit         = webm_chunk_deinit,
     .priv_class     = &webm_chunk_class,
 };
-#endif
