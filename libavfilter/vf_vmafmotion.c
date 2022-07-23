@@ -312,7 +312,7 @@ static av_cold int init(AVFilterContext *ctx)
         if (!strcmp(s->stats_file_str, "-")) {
             s->stats_file = stdout;
         } else {
-            s->stats_file = fopen(s->stats_file_str, "w");
+            s->stats_file = avpriv_fopen_utf8(s->stats_file_str, "w");
             if (!s->stats_file) {
                 int err = AVERROR(errno);
                 char buf[128];
@@ -363,6 +363,7 @@ const AVFilter ff_vf_vmafmotion = {
     .uninit        = uninit,
     .priv_size     = sizeof(VMAFMotionContext),
     .priv_class    = &vmafmotion_class,
+    .flags         = AVFILTER_FLAG_METADATA_ONLY,
     FILTER_INPUTS(vmafmotion_inputs),
     FILTER_OUTPUTS(vmafmotion_outputs),
     FILTER_QUERY_FUNC(query_formats),

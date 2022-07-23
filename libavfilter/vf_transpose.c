@@ -235,13 +235,13 @@ static int config_props_output(AVFilterLink *outlink)
         }
     }
 
-    if (ARCH_X86) {
-        for (int i = 0; i < 4; i++) {
-            TransVtable *v = &s->vtables[i];
+#if ARCH_X86
+    for (int i = 0; i < 4; i++) {
+        TransVtable *v = &s->vtables[i];
 
-            ff_transpose_init_x86(v, s->pixsteps[i]);
-        }
+        ff_transpose_init_x86(v, s->pixsteps[i]);
     }
+#endif
 
     av_log(ctx, AV_LOG_VERBOSE,
            "w:%d h:%d dir:%d -> w:%d h:%d rotation:%s vflip:%d\n",
@@ -328,6 +328,7 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr,
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
+    int err = 0;
     AVFilterContext *ctx = inlink->dst;
     TransContext *s = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
@@ -339,10 +340,13 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
     out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
     if (!out) {
-        av_frame_free(&in);
-        return AVERROR(ENOMEM);
+        err = AVERROR(ENOMEM);
+        goto fail;
     }
-    av_frame_copy_props(out, in);
+
+    err = av_frame_copy_props(out, in);
+    if (err < 0)
+        goto fail;
 
     if (in->sample_aspect_ratio.num == 0) {
         out->sample_aspect_ratio = in->sample_aspect_ratio;
@@ -356,6 +360,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
                       FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
     av_frame_free(&in);
     return ff_filter_frame(outlink, out);
+
+fail:
+    av_frame_free(&in);
+    av_frame_free(&out);
+    return err;
 }
 
 #define OFFSET(x) offsetof(TransContext, x)

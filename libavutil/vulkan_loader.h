@@ -43,7 +43,11 @@ static inline uint64_t ff_vk_extensions_to_mask(const char * const *extensions,
         { VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,        FF_VK_EXT_EXTERNAL_FD_MEMORY     },
         { VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,     FF_VK_EXT_EXTERNAL_FD_SEM        },
         { VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME,      FF_VK_EXT_EXTERNAL_HOST_MEMORY   },
-        { VK_EXT_DEBUG_UTILS_EXTENSION_NAME,               FF_VK_EXT_DEBUG_UTILS            }
+        { VK_EXT_DEBUG_UTILS_EXTENSION_NAME,               FF_VK_EXT_DEBUG_UTILS            },
+#ifdef _WIN32
+        { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,     FF_VK_EXT_EXTERNAL_WIN32_MEMORY  },
+        { VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,  FF_VK_EXT_EXTERNAL_WIN32_SEM     },
+#endif
     };
 
     FFVulkanExtensions mask = 0x0;
@@ -88,6 +92,9 @@ static inline int ff_vk_load_functions(AVHWDeviceContext *ctx,
         const char *names[3];
     } vk_load_info[] = {
         FN_LIST(PFN_LOAD_INFO)
+#ifdef _WIN32
+        FN_LIST_WIN32(PFN_LOAD_INFO)
+#endif
     };
 
     for (int i = 0; i < FF_ARRAY_ELEMS(vk_load_info); i++) {
@@ -114,7 +121,7 @@ static inline int ff_vk_load_functions(AVHWDeviceContext *ctx,
         }
 
         if (!fn && ((extensions_mask &~ FF_VK_EXT_NO_FLAG) & load->ext_flag)) {
-            av_log(ctx, AV_LOG_ERROR, "Loader error, function \"%s\" indicated"
+            av_log(ctx, AV_LOG_ERROR, "Loader error, function \"%s\" indicated "
                    "as supported, but got NULL function pointer!\n", load->names[0]);
             return AVERROR_EXTERNAL;
         }

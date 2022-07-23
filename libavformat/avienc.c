@@ -25,8 +25,10 @@
 #include "internal.h"
 #include "avi.h"
 #include "avio_internal.h"
+#include "config_components.h"
 #include "riff.h"
 #include "mpegts.h"
+#include "rawutils.h"
 #include "libavformat/avlanguage.h"
 #include "libavutil/avstring.h"
 #include "libavutil/avutil.h"
@@ -424,6 +426,10 @@ static int avi_write_header(AVFormatContext *s)
         avio_wl32(pb, -1); /* quality */
         avio_wl32(pb, au_ssize); /* sample size */
         avio_wl32(pb, 0);
+        if (par->width > 65535 || par->height > 65535) {
+            av_log(s, AV_LOG_ERROR, "%dx%d dimensions are too big\n", par->width, par->height);
+            return AVERROR(EINVAL);
+        }
         avio_wl16(pb, par->width);
         avio_wl16(pb, par->height);
         ff_end_tag(pb, strh);
@@ -448,7 +454,7 @@ static int avi_write_header(AVFormatContext *s)
                     par->bits_per_coded_sample = 16;
                 avist->pal_offset = avio_tell(pb) + 40;
                 ff_put_bmp_header(pb, par, 0, 0, avi->flipped_raw_rgb);
-                pix_fmt = avpriv_find_pix_fmt(avpriv_pix_fmt_bps_avi,
+                pix_fmt = avpriv_pix_fmt_find(PIX_FMT_LIST_AVI,
                                               par->bits_per_coded_sample);
                 if (   !par->codec_tag
                     && par->codec_id == AV_CODEC_ID_RAWVIDEO

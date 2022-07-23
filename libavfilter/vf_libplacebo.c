@@ -19,12 +19,39 @@
 #include "libavutil/file.h"
 #include "libavutil/opt.h"
 #include "internal.h"
-#include "vulkan.h"
+#include "vulkan_filter.h"
 #include "scale_eval.h"
 
 #include <libplacebo/renderer.h>
 #include <libplacebo/utils/libav.h>
 #include <libplacebo/vulkan.h>
+
+enum {
+    TONE_MAP_AUTO,
+    TONE_MAP_CLIP,
+    TONE_MAP_BT2390,
+    TONE_MAP_BT2446A,
+    TONE_MAP_SPLINE,
+    TONE_MAP_REINHARD,
+    TONE_MAP_MOBIUS,
+    TONE_MAP_HABLE,
+    TONE_MAP_GAMMA,
+    TONE_MAP_LINEAR,
+    TONE_MAP_COUNT,
+};
+
+static const struct pl_tone_map_function * const tonemapping_funcs[TONE_MAP_COUNT] = {
+    [TONE_MAP_AUTO]     = &pl_tone_map_auto,
+    [TONE_MAP_CLIP]     = &pl_tone_map_clip,
+    [TONE_MAP_BT2390]   = &pl_tone_map_bt2390,
+    [TONE_MAP_BT2446A]  = &pl_tone_map_bt2446a,
+    [TONE_MAP_SPLINE]   = &pl_tone_map_spline,
+    [TONE_MAP_REINHARD] = &pl_tone_map_reinhard,
+    [TONE_MAP_MOBIUS]   = &pl_tone_map_mobius,
+    [TONE_MAP_HABLE]    = &pl_tone_map_hable,
+    [TONE_MAP_GAMMA]    = &pl_tone_map_gamma,
+    [TONE_MAP_LINEAR]   = &pl_tone_map_linear,
+};
 
 typedef struct LibplaceboContext {
     /* lavfi vulkan*/
@@ -47,6 +74,7 @@ typedef struct LibplaceboContext {
     int force_divisible_by;
     int normalize_sar;
     int apply_filmgrain;
+    int apply_dovi;
     int colorspace;
     int color_range;
     int color_primaries;
@@ -62,7 +90,7 @@ typedef struct LibplaceboContext {
     float polar_cutoff;
     int disable_linear;
     int disable_builtin;
-    int force_3dlut;
+    int force_icc_lut;
     int force_dither;
     int disable_fbos;
 
@@ -90,12 +118,16 @@ typedef struct LibplaceboContext {
 
     /* pl_color_map_params */
     int intent;
+    int gamut_mode;
     int tonemapping;
     float tonemapping_param;
+    int tonemapping_mode;
+    int inverse_tonemapping;
+    float crosstalk;
+    int tonemapping_lut_size;
+    /* for backwards compatibility */
     float desat_str;
     float desat_exp;
-    float desat_base;
-    float max_boost;
     int gamut_warning;
     int gamut_clipping;
 
@@ -270,69 +302,33 @@ static void libplacebo_uninit(AVFilterContext *avctx)
     pl_renderer_destroy(&s->renderer);
     pl_vulkan_destroy(&s->vulkan);
     pl_log_destroy(&s->log);
-    ff_vk_filter_uninit(avctx);
+    ff_vk_uninit(&s->vkctx);
     s->initialized = 0;
     s->gpu = NULL;
 }
 
-static int wrap_vkframe(pl_gpu gpu, const AVFrame *frame, int plane, pl_tex *tex)
-{
-    AVVkFrame *vkf = (AVVkFrame *) frame->data[0];
-    const AVHWFramesContext *hwfc = (AVHWFramesContext *) frame->hw_frames_ctx->data;
-    const AVVulkanFramesContext *vkfc = hwfc->hwctx;
-    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(hwfc->sw_format);
-    const VkFormat *vk_fmt = av_vkfmt_from_pixfmt(hwfc->sw_format);
-    const int chroma = plane == 1 || plane == 2;
-
-    *tex = pl_vulkan_wrap(gpu, pl_vulkan_wrap_params(
-        .image = vkf->img[plane],
-        .format = vk_fmt[plane],
-        .width = AV_CEIL_RSHIFT(frame->width, chroma ? desc->log2_chroma_w : 0),
-        .height = AV_CEIL_RSHIFT(frame->height, chroma ? desc->log2_chroma_h : 0),
-        .usage = vkfc->usage,
-    ));
-
-    if (!*tex)
-        return AVERROR(ENOMEM);
-
-    pl_vulkan_release(gpu, *tex, vkf->layout[plane], (pl_vulkan_sem) {
-        .sem = vkf->sem[plane],
-        .value = vkf->sem_value[plane]
-    });
-    return 0;
-}
-
-static int unwrap_vkframe(pl_gpu gpu, AVFrame *frame, int plane, pl_tex *tex)
-{
-    AVVkFrame *vkf = (AVVkFrame *) frame->data[0];
-    int ok = pl_vulkan_hold_raw(gpu, *tex, &vkf->layout[plane],
-                                (pl_vulkan_sem) { vkf->sem[plane], vkf->sem_value[plane] + 1 });
-    vkf->access[plane] = 0;
-    vkf->sem_value[plane] += !!ok;
-    return ok ? 0 : AVERROR_EXTERNAL;
-}
-
-static void set_sample_depth(struct pl_frame *out_frame, const AVFrame *frame)
-{
-    const AVHWFramesContext *hwfc = (AVHWFramesContext *) frame->hw_frames_ctx->data;
-    pl_fmt fmt = out_frame->planes[0].texture->params.format;
-    struct pl_bit_encoding *bits = &out_frame->repr.bits;
-    bits->sample_depth = fmt->component_depth[0];
-
-    switch (hwfc->sw_format) {
-    case AV_PIX_FMT_P010: bits->bit_shift = 6; break;
-    default: break;
-    }
-}
-
 static int process_frames(AVFilterContext *avctx, AVFrame *out, AVFrame *in)
 {
-    int err = 0;
+    int err = 0, ok;
     LibplaceboContext *s = avctx->priv;
     struct pl_render_params params;
+    enum pl_tone_map_mode tonemapping_mode = s->tonemapping_mode;
+    enum pl_gamut_mode gamut_mode = s->gamut_mode;
     struct pl_frame image, target;
-    pl_frame_from_avframe(&image, in);
-    pl_frame_from_avframe(&target, out);
+    ok = pl_map_avframe_ex(s->gpu, &image, pl_avframe_params(
+        .frame    = in,
+        .map_dovi = s->apply_dovi,
+    ));
+
+    ok &= pl_map_avframe_ex(s->gpu, &target, pl_avframe_params(
+        .frame    = out,
+        .map_dovi = false,
+    ));
+
+    if (!ok) {
+        err = AVERROR_EXTERNAL;
+        goto fail;
+    }
 
     if (!s->apply_filmgrain)
         image.film_grain.type = PL_FILM_GRAIN_NONE;
@@ -341,6 +337,24 @@ static int process_frames(AVFilterContext *avctx, AVFrame *out, AVFrame *in)
         float aspect = pl_rect2df_aspect(&target.crop) * av_q2d(s->target_sar);
         pl_rect2df_aspect_set(&target.crop, aspect, s->pad_crop_ratio);
     }
+
+    /* backwards compatibility with older API */
+    if (!tonemapping_mode && (s->desat_str >= 0.0f || s->desat_exp >= 0.0f)) {
+        float str = s->desat_str < 0.0f ? 0.9f : s->desat_str;
+        float exp = s->desat_exp < 0.0f ? 0.2f : s->desat_exp;
+        if (str >= 0.9f && exp <= 0.1f) {
+            tonemapping_mode = PL_TONE_MAP_RGB;
+        } else if (str > 0.1f) {
+            tonemapping_mode = PL_TONE_MAP_HYBRID;
+        } else {
+            tonemapping_mode = PL_TONE_MAP_LUMA;
+        }
+    }
+
+    if (s->gamut_warning)
+        gamut_mode = PL_GAMUT_WARN;
+    if (s->gamut_clipping)
+        gamut_mode = PL_GAMUT_DESATURATE;
 
     /* Update render params */
     params = (struct pl_render_params) {
@@ -375,14 +389,13 @@ static int process_frames(AVFilterContext *avctx, AVFrame *out, AVFrame *in)
 
         .color_map_params = pl_color_map_params(
             .intent = s->intent,
-            .tone_mapping_algo = s->tonemapping,
+            .gamut_mode = gamut_mode,
+            .tone_mapping_function = tonemapping_funcs[s->tonemapping],
             .tone_mapping_param = s->tonemapping_param,
-            .desaturation_strength = s->desat_str,
-            .desaturation_exponent = s->desat_exp,
-            .desaturation_base = s->desat_base,
-            .max_boost = s->max_boost,
-            .gamut_warning = s->gamut_warning,
-            .gamut_clipping = s->gamut_clipping,
+            .tone_mapping_mode = tonemapping_mode,
+            .inverse_tone_mapping = s->inverse_tonemapping,
+            .tone_mapping_crosstalk = s->crosstalk,
+            .lut_size = s->tonemapping_lut_size,
         ),
 
         .dither_params = s->dithering < 0 ? NULL : pl_dither_params(
@@ -403,7 +416,7 @@ static int process_frames(AVFilterContext *avctx, AVFrame *out, AVFrame *in)
         .polar_cutoff = s->polar_cutoff,
         .disable_linear_scaling = s->disable_linear,
         .disable_builtin_scalers = s->disable_builtin,
-        .force_3dlut = s->force_3dlut,
+        .force_icc_lut = s->force_icc_lut,
         .force_dither = s->force_dither,
         .disable_fbos = s->disable_fbos,
     };
@@ -411,44 +424,23 @@ static int process_frames(AVFilterContext *avctx, AVFrame *out, AVFrame *in)
     RET(find_scaler(avctx, &params.upscaler, s->upscaler));
     RET(find_scaler(avctx, &params.downscaler, s->downscaler));
 
-    /* Ideally, we would persistently wrap all of these AVVkFrames into pl_tex
-     * objects, but for now we'll just create and destroy a wrapper per frame.
-     * Note that doing it this way is suboptimal, since it results in the
-     * creation and destruction of a VkSampler and VkFramebuffer per frame.
-     *
-     * FIXME: Can we do better? */
-    for (int i = 0; i < image.num_planes; i++)
-        RET(wrap_vkframe(s->gpu, in, i, &image.planes[i].texture));
-    for (int i = 0; i < target.num_planes; i++)
-        RET(wrap_vkframe(s->gpu, out, i, &target.planes[i].texture));
-
-    /* Since we-re mapping vkframes manually, the pl_frame helpers don't know
-     * about the mismatch between the sample format and the color depth. */
-    set_sample_depth(&image, in);
-    set_sample_depth(&target, out);
-
     pl_render_image(s->renderer, &image, &target, &params);
-
-    for (int i = 0; i < image.num_planes; i++)
-        RET(unwrap_vkframe(s->gpu, in, i, &image.planes[i].texture));
-    for (int i = 0; i < target.num_planes; i++)
-        RET(unwrap_vkframe(s->gpu, out, i, &target.planes[i].texture));
+    pl_unmap_avframe(s->gpu, &image);
+    pl_unmap_avframe(s->gpu, &target);
 
     /* Flush the command queues for performance */
     pl_gpu_flush(s->gpu);
+    return 0;
 
-    /* fall through */
 fail:
-    for (int i = 0; i < image.num_planes; i++)
-        pl_tex_destroy(s->gpu, &image.planes[i].texture);
-    for (int i = 0; i < target.num_planes; i++)
-        pl_tex_destroy(s->gpu, &target.planes[i].texture);
+    pl_unmap_avframe(s->gpu, &image);
+    pl_unmap_avframe(s->gpu, &target);
     return err;
 }
 
 static int filter_frame(AVFilterLink *link, AVFrame *in)
 {
-    int err;
+    int err, changed_csp;
     AVFilterContext *ctx = link->dst;
     LibplaceboContext *s = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
@@ -467,6 +459,14 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     out->width = outlink->w;
     out->height = outlink->h;
 
+    if (s->apply_dovi && av_frame_get_side_data(in, AV_FRAME_DATA_DOVI_METADATA)) {
+        /* Output of dovi reshaping is always BT.2020+PQ, so infer the correct
+         * output colorspace defaults */
+        out->colorspace = AVCOL_SPC_BT2020_NCL;
+        out->color_primaries = AVCOL_PRI_BT2020;
+        out->color_trc = AVCOL_TRC_SMPTE2084;
+    }
+
     if (s->colorspace >= 0)
         out->colorspace = s->colorspace;
     if (s->color_range >= 0)
@@ -476,10 +476,24 @@ static int filter_frame(AVFilterLink *link, AVFrame *in)
     if (s->color_primaries >= 0)
         out->color_primaries = s->color_primaries;
 
-    RET(process_frames(ctx, out, in));
+    changed_csp = in->colorspace      != out->colorspace     ||
+                  in->color_range     != out->color_range    ||
+                  in->color_trc       != out->color_trc      ||
+                  in->color_primaries != out->color_primaries;
 
+    /* Strip side data if no longer relevant */
+    if (changed_csp) {
+        av_frame_remove_side_data(out, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+        av_frame_remove_side_data(out, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+    }
+    if (s->apply_dovi || changed_csp) {
+        av_frame_remove_side_data(out, AV_FRAME_DATA_DOVI_RPU_BUFFER);
+        av_frame_remove_side_data(out, AV_FRAME_DATA_DOVI_METADATA);
+    }
     if (s->apply_filmgrain)
         av_frame_remove_side_data(out, AV_FRAME_DATA_FILM_GRAIN_PARAMS);
+
+    RET(process_frames(ctx, out, in));
 
     av_frame_free(&in);
 
@@ -626,6 +640,7 @@ static const AVOption libplacebo_options[] = {
     { "antiringing", "Antiringing strength (for non-EWA filters)", OFFSET(antiringing), AV_OPT_TYPE_FLOAT, {.dbl = 0.0}, 0.0, 1.0, DYNAMIC },
     { "sigmoid", "Enable sigmoid upscaling", OFFSET(sigmoid), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, DYNAMIC },
     { "apply_filmgrain", "Apply film grain metadata", OFFSET(apply_filmgrain), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, DYNAMIC },
+    { "apply_dolbyvision", "Apply Dolby Vision metadata", OFFSET(apply_dovi), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, DYNAMIC },
 
     { "deband", "Enable debanding", OFFSET(deband), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC },
     { "deband_iterations", "Deband iterations", OFFSET(deband_iterations), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 16, DYNAMIC },
@@ -651,21 +666,37 @@ static const AVOption libplacebo_options[] = {
         { "relative", "Relative colorimetric", 0, AV_OPT_TYPE_CONST, {.i64 = PL_INTENT_RELATIVE_COLORIMETRIC}, 0, 0, STATIC, "intent" },
         { "absolute", "Absolute colorimetric", 0, AV_OPT_TYPE_CONST, {.i64 = PL_INTENT_ABSOLUTE_COLORIMETRIC}, 0, 0, STATIC, "intent" },
         { "saturation", "Saturation mapping", 0, AV_OPT_TYPE_CONST, {.i64 = PL_INTENT_SATURATION}, 0, 0, STATIC, "intent" },
-    { "tonemapping", "Tone-mapping algorithm", OFFSET(tonemapping), AV_OPT_TYPE_INT, {.i64 = PL_TONE_MAPPING_BT_2390}, 0, PL_TONE_MAPPING_ALGORITHM_COUNT - 1, DYNAMIC, "tonemap" },
-        { "clip", "Hard-clipping", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAPPING_CLIP}, 0, 0, STATIC, "tonemap" },
-        { "mobius", "Mobius tone-mapping", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAPPING_MOBIUS}, 0, 0, STATIC, "tonemap" },
-        { "reinhard", "Reinhard tone-mapping", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAPPING_REINHARD}, 0, 0, STATIC, "tonemap" },
-        { "hable", "Hable/Filmic tone-mapping", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAPPING_HABLE}, 0, 0, STATIC, "tonemap" },
-        { "gamma", "Gamma tone-mapping", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAPPING_GAMMA}, 0, 0, STATIC, "tonemap" },
-        { "linear", "Linear tone-mapping", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAPPING_LINEAR}, 0, 0, STATIC, "tonemap" },
-        { "bt.2390", "ITU-R BT.2390 tone-mapping", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAPPING_BT_2390}, 0, 0, STATIC, "tonemap" },
+    { "gamut_mode", "Gamut-mapping mode", OFFSET(gamut_mode), AV_OPT_TYPE_INT, {.i64 = PL_GAMUT_CLIP}, 0, PL_GAMUT_MODE_COUNT - 1, DYNAMIC, "gamut_mode" },
+        { "clip", "Hard-clip gamut boundary", 0, AV_OPT_TYPE_CONST, {.i64 = PL_GAMUT_CLIP}, 0, 0, STATIC, "gamut_mode" },
+        { "warn", "Highlight out-of-gamut colors", 0, AV_OPT_TYPE_CONST, {.i64 = PL_GAMUT_WARN}, 0, 0, STATIC, "gamut_mode" },
+        { "darken", "Darken image to fit gamut", 0, AV_OPT_TYPE_CONST, {.i64 = PL_GAMUT_DARKEN}, 0, 0, STATIC, "gamut_mode" },
+        { "desaturate", "Colorimetrically desaturate colors", 0, AV_OPT_TYPE_CONST, {.i64 = PL_GAMUT_DESATURATE}, 0, 0, STATIC, "gamut_mode" },
+    { "tonemapping", "Tone-mapping algorithm", OFFSET(tonemapping), AV_OPT_TYPE_INT, {.i64 = TONE_MAP_AUTO}, 0, TONE_MAP_COUNT - 1, DYNAMIC, "tonemap" },
+        { "auto", "Automatic selection", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_AUTO}, 0, 0, STATIC, "tonemap" },
+        { "clip", "No tone mapping (clip", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_CLIP}, 0, 0, STATIC, "tonemap" },
+        { "bt.2390", "ITU-R BT.2390 EETF", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_BT2390}, 0, 0, STATIC, "tonemap" },
+        { "bt.2446a", "ITU-R BT.2446 Method A", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_BT2446A}, 0, 0, STATIC, "tonemap" },
+        { "spline", "Single-pivot polynomial spline", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_SPLINE}, 0, 0, STATIC, "tonemap" },
+        { "reinhard", "Reinhard", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_REINHARD}, 0, 0, STATIC, "tonemap" },
+        { "mobius", "Mobius", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_MOBIUS}, 0, 0, STATIC, "tonemap" },
+        { "hable", "Filmic tone-mapping (Hable)", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_HABLE}, 0, 0, STATIC, "tonemap" },
+        { "gamma", "Gamma function with knee", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_GAMMA}, 0, 0, STATIC, "tonemap" },
+        { "linear", "Perceptually linear stretch", 0, AV_OPT_TYPE_CONST, {.i64 = TONE_MAP_LINEAR}, 0, 0, STATIC, "tonemap" },
     { "tonemapping_param", "Tunable parameter for some tone-mapping functions", OFFSET(tonemapping_param), AV_OPT_TYPE_FLOAT, {.dbl = 0.0}, 0.0, 100.0, .flags = DYNAMIC },
-    { "desaturation_strength", "Desaturation strength", OFFSET(desat_str), AV_OPT_TYPE_FLOAT, {.dbl = 0.90}, 0.0, 1.0, DYNAMIC },
-    { "desaturation_exponent", "Desaturation exponent", OFFSET(desat_exp), AV_OPT_TYPE_FLOAT, {.dbl = 0.2}, 0.0, 10.0, DYNAMIC },
-    { "desaturation_base", "Desaturation base", OFFSET(desat_base), AV_OPT_TYPE_FLOAT, {.dbl = 0.18}, 0.0, 10.0, DYNAMIC },
-    { "max_boost", "Tone-mapping maximum boost", OFFSET(max_boost), AV_OPT_TYPE_FLOAT, {.dbl = 1.0}, 1.0, 10.0, DYNAMIC },
-    { "gamut_warning", "Highlight out-of-gamut colors", OFFSET(gamut_warning), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC },
-    { "gamut_clipping", "Enable colorimetric gamut clipping", OFFSET(gamut_clipping), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, DYNAMIC },
+    { "tonemapping_mode", "Tone-mapping mode", OFFSET(tonemapping_mode), AV_OPT_TYPE_INT, {.i64 = PL_TONE_MAP_AUTO}, 0, PL_TONE_MAP_MODE_COUNT - 1, DYNAMIC, "tonemap_mode" },
+        { "auto", "Automatic selection", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAP_AUTO}, 0, 0, STATIC, "tonemap_mode" },
+        { "rgb", "Per-channel (RGB)", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAP_RGB}, 0, 0, STATIC, "tonemap_mode" },
+        { "max", "Maximum component", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAP_MAX}, 0, 0, STATIC, "tonemap_mode" },
+        { "hybrid", "Hybrid of Luma/RGB", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAP_HYBRID}, 0, 0, STATIC, "tonemap_mode" },
+        { "luma", "Luminance", 0, AV_OPT_TYPE_CONST, {.i64 = PL_TONE_MAP_LUMA}, 0, 0, STATIC, "tonemap_mode" },
+    { "inverse_tonemapping", "Inverse tone mapping (range expansion)", OFFSET(inverse_tonemapping), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC },
+    { "tonemapping_crosstalk", "Crosstalk factor for tone-mapping", OFFSET(crosstalk), AV_OPT_TYPE_FLOAT, {.dbl = 0.04}, 0.0, 0.30, DYNAMIC },
+    { "tonemapping_lut_size", "Tone-mapping LUT size", OFFSET(tonemapping_lut_size), AV_OPT_TYPE_INT, {.i64 = 256}, 2, 1024, DYNAMIC },
+    /* deprecated options for backwards compatibility, defaulting to -1 to not override the new defaults */
+    { "desaturation_strength", "Desaturation strength", OFFSET(desat_str), AV_OPT_TYPE_FLOAT, {.dbl = -1.0}, -1.0, 1.0, DYNAMIC | AV_OPT_FLAG_DEPRECATED },
+    { "desaturation_exponent", "Desaturation exponent", OFFSET(desat_exp), AV_OPT_TYPE_FLOAT, {.dbl = -1.0}, -1.0, 10.0, DYNAMIC | AV_OPT_FLAG_DEPRECATED },
+    { "gamut_warning", "Highlight out-of-gamut colors", OFFSET(gamut_warning), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC | AV_OPT_FLAG_DEPRECATED },
+    { "gamut_clipping", "Enable colorimetric gamut clipping", OFFSET(gamut_clipping), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC | AV_OPT_FLAG_DEPRECATED },
 
     { "dithering", "Dither method to use", OFFSET(dithering), AV_OPT_TYPE_INT, {.i64 = PL_DITHER_BLUE_NOISE}, -1, PL_DITHER_METHOD_COUNT - 1, DYNAMIC, "dither" },
         { "none", "Disable dithering", 0, AV_OPT_TYPE_CONST, {.i64 = -1}, 0, 0, STATIC, "dither" },
@@ -687,10 +718,10 @@ static const AVOption libplacebo_options[] = {
 
     /* Performance/quality tradeoff options */
     { "skip_aa", "Skip anti-aliasing", OFFSET(skip_aa), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 0, DYNAMIC },
-    { "polar_cutoff", "Polar LUT cutoff", OFFSET(polar_cutoff), AV_OPT_TYPE_FLOAT, {.i64 = 0}, 0.0, 1.0, DYNAMIC },
+    { "polar_cutoff", "Polar LUT cutoff", OFFSET(polar_cutoff), AV_OPT_TYPE_FLOAT, {.dbl = 0}, 0.0, 1.0, DYNAMIC },
     { "disable_linear", "Disable linear scaling", OFFSET(disable_linear), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC },
     { "disable_builtin", "Disable built-in scalers", OFFSET(disable_builtin), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC },
-    { "force_3dlut", "Force the use of a full 3DLUT", OFFSET(force_3dlut), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC },
+    { "force_icc_lut", "Force the use of a full ICC 3DLUT for color mapping", OFFSET(force_icc_lut), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC },
     { "force_dither", "Force dithering", OFFSET(force_dither), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC },
     { "disable_fbos", "Force-disable FBOs", OFFSET(disable_fbos), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, DYNAMIC },
     { NULL },
@@ -715,7 +746,7 @@ static const AVFilterPad libplacebo_outputs[] = {
     },
 };
 
-AVFilter ff_vf_libplacebo = {
+const AVFilter ff_vf_libplacebo = {
     .name           = "libplacebo",
     .description    = NULL_IF_CONFIG_SMALL("Apply various GPU filters from libplacebo"),
     .priv_size      = sizeof(LibplaceboContext),

@@ -163,6 +163,8 @@ static const AVOption v360_options[] = {
     {    "ih_fov", "input horizontal field of view",OFFSET(ih_fov), AV_OPT_TYPE_FLOAT,  {.dbl=0.f},           0.f,               360.f,TFLAGS, "ih_fov"},
     {    "iv_fov", "input vertical field of view",  OFFSET(iv_fov), AV_OPT_TYPE_FLOAT,  {.dbl=0.f},           0.f,               360.f,TFLAGS, "iv_fov"},
     {    "id_fov", "input diagonal field of view",  OFFSET(id_fov), AV_OPT_TYPE_FLOAT,  {.dbl=0.f},           0.f,               360.f,TFLAGS, "id_fov"},
+    {  "h_offset", "output horizontal off-axis offset",OFFSET(h_offset), AV_OPT_TYPE_FLOAT,{.dbl=0.f},       -1.f,                 1.f,TFLAGS, "h_offset"},
+    {  "v_offset", "output vertical off-axis offset",  OFFSET(v_offset), AV_OPT_TYPE_FLOAT,{.dbl=0.f},       -1.f,                 1.f,TFLAGS, "v_offset"},
     {"alpha_mask", "build mask in alpha plane",      OFFSET(alpha), AV_OPT_TYPE_BOOL,   {.i64=0},               0,                   1, FLAGS, "alpha"},
     { "reset_rot", "reset rotation",             OFFSET(reset_rot), AV_OPT_TYPE_BOOL,   {.i64=0},              -1,                   1,TFLAGS, "reset_rot"},
     { NULL }
@@ -387,8 +389,9 @@ void ff_v360_init(V360Context *s, int depth)
         break;
     }
 
-    if (ARCH_X86)
-        ff_v360_init_x86(s, depth);
+#if ARCH_X86
+    ff_v360_init_x86(s, depth);
+#endif
 }
 
 /**
@@ -1028,6 +1031,17 @@ static inline void rotate_cube_face_inverse(float *uf, float *vf, int rotation)
 }
 
 /**
+ * Offset vector.
+ *
+ * @param vec vector
+ */
+static void offset_vector(float *vec, float h_offset, float v_offset)
+{
+    vec[0] += h_offset;
+    vec[1] += v_offset;
+}
+
+/**
  * Normalize vector.
  *
  * @param vec vector
@@ -1103,8 +1117,6 @@ static void cube_to_xyz(const V360Context *s,
     vec[0] = l_x;
     vec[1] = l_y;
     vec[2] = l_z;
-
-    normalize_vector(vec);
 }
 
 /**
@@ -1854,8 +1866,6 @@ static int stereographic_to_xyz(const V360Context *s,
     vec[1] = y / r * sin_theta;
     vec[2] = cosf(theta);
 
-    normalize_vector(vec);
-
     return 1;
 }
 
@@ -1959,8 +1969,6 @@ static int equisolid_to_xyz(const V360Context *s,
     vec[0] = x / r * sin_theta;
     vec[1] = y / r * sin_theta;
     vec[2] = cosf(theta);
-
-    normalize_vector(vec);
 
     return 1;
 }
@@ -2066,12 +2074,11 @@ static int orthographic_to_xyz(const V360Context *s,
         vec[0] = x;
         vec[1] = y;
 
-        normalize_vector(vec);
         return 1;
     } else {
-        vec[0] = 0;
-        vec[1] = 0;
-        vec[2] = 1;
+        vec[0] = 0.f;
+        vec[1] = 0.f;
+        vec[2] = 1.f;
 
         return 0;
     }
@@ -2474,8 +2481,6 @@ static int hammer_to_xyz(const V360Context *s,
     vec[1] = M_SQRT2 * y * z;
     vec[2] = w * (bb  - aa) / (aa + bb);
 
-    normalize_vector(vec);
-
     return 1;
 }
 
@@ -2545,8 +2550,6 @@ static int sinusoidal_to_xyz(const V360Context *s,
     vec[0] = cos_theta * sin_phi;
     vec[1] = sin_theta;
     vec[2] = cos_theta * cos_phi;
-
-    normalize_vector(vec);
 
     return 1;
 }
@@ -2743,8 +2746,6 @@ static int eac_to_xyz(const V360Context *s,
     vec[1] = l_y;
     vec[2] = l_z;
 
-    normalize_vector(vec);
-
     return 1;
 }
 
@@ -2846,8 +2847,6 @@ static int flat_to_xyz(const V360Context *s,
     vec[1] = l_y;
     vec[2] = 1.f;
 
-    normalize_vector(vec);
-
     return 1;
 }
 
@@ -2897,8 +2896,6 @@ static int fisheye_to_xyz(const V360Context *s,
     vec[1] = cos_theta * sin_phi;
     vec[2] = sin_theta;
 
-    normalize_vector(vec);
-
     return 1;
 }
 
@@ -2945,8 +2942,8 @@ static int xyz_to_fisheye(const V360Context *s,
     const int visible = -0.5f < uf && uf < 0.5f && -0.5f < vf && vf < 0.5f;
     int ui, vi;
 
-    uf = (uf + 0.5f) * width;
-    vf = (vf + 0.5f) * height;
+    uf = scale(uf * 2.f, width);
+    vf = scale(vf * 2.f, height);
 
     ui = floorf(uf);
     vi = floorf(vf);
@@ -2992,8 +2989,6 @@ static int pannini_to_xyz(const V360Context *s,
     vec[0] = sinf(lon) * cosf(lat);
     vec[1] = sinf(lat);
     vec[2] = cosf(lon) * cosf(lat);
-
-    normalize_vector(vec);
 
     return 1;
 }
@@ -3089,8 +3084,6 @@ static int cylindrical_to_xyz(const V360Context *s,
     vec[0] = cos_theta * sin_phi;
     vec[1] = sin_theta;
     vec[2] = cos_theta * cos_phi;
-
-    normalize_vector(vec);
 
     return 1;
 }
@@ -3217,8 +3210,6 @@ static int cylindricalea_to_xyz(const V360Context *s,
     vec[1] = sin_theta;
     vec[2] = cos_theta * cos_phi;
 
-    normalize_vector(vec);
-
     return 1;
 }
 
@@ -3331,8 +3322,6 @@ static int tetrahedron_to_xyz(const V360Context *s,
     vec[1] = 1.f - vf * 2.f;
     vec[2] = 2.f * fabsf(1.f - fabsf(1.f - uf * 2.f + vf)) - 1.f;
 
-    normalize_vector(vec);
-
     return 1;
 }
 
@@ -3444,8 +3433,6 @@ static int dfisheye_to_xyz(const V360Context *s,
     vec[1] = cos_theta *     vf / lh;
     vec[2] = sin_theta;
 
-    normalize_vector(vec);
-
     return 1;
 }
 
@@ -3465,7 +3452,7 @@ static int xyz_to_dfisheye(const V360Context *s,
                            const float *vec, int width, int height,
                            int16_t us[4][4], int16_t vs[4][4], float *du, float *dv)
 {
-    const float ew = (width - 1) * 0.5f;
+    const float ew = width * 0.5f;
     const float eh = height;
 
     const float h     = hypotf(vec[0], vec[1]);
@@ -3482,7 +3469,7 @@ static int xyz_to_dfisheye(const V360Context *s,
         u_shift = ceilf(ew);
     } else {
         u_shift = 0;
-        uf = ew - uf;
+        uf = ew - uf - 1.f;
     }
 
     ui = floorf(uf);
@@ -3493,7 +3480,7 @@ static int xyz_to_dfisheye(const V360Context *s,
 
     for (int i = 0; i < 4; i++) {
         for (int j = 0; j < 4; j++) {
-            us[i][j] = av_clip(u_shift + ui + j - 1, 0, width  - 1);
+            us[i][j] = u_shift + av_clip(ui + j - 1, 0, ew - 1);
             vs[i][j] = av_clip(          vi + i - 1, 0, height - 1);
         }
     }
@@ -3567,8 +3554,6 @@ static int barrel_to_xyz(const V360Context *s,
     vec[0] = l_x;
     vec[1] = l_y;
     vec[2] = l_z;
-
-    normalize_vector(vec);
 
     return 1;
 }
@@ -3692,37 +3677,39 @@ static int xyz_to_barrelsplit(const V360Context *s,
     } else {
         const float scalew = s->fin_pad > 0 ? 1.f - s->fin_pad / (width  / 3.f) : 1.f - s->in_pad;
         const float scaleh = s->fin_pad > 0 ? 1.f - s->fin_pad / (height / 4.f) : 1.f - s->in_pad;
-        int v_offset = 0;
 
         ew = width  / 3;
         eh = height / 4;
 
         u_shift = 2 * ew;
 
+        uf = vec[0] / vec[1] * scalew;
+        vf = vec[2] / vec[1] * scaleh;
+
         if (theta <= 0.f && theta >= -M_PI_2 &&
             phi <= M_PI_2 && phi >= -M_PI_2) {
-            uf = -vec[0] / vec[1];
-            vf = -vec[2] / vec[1];
+            // front top
+            uf *= -1.0f;
+            vf  = -(vf + 1.f) * scaleh + 1.f;
             v_shift = 0;
-            v_offset = -eh;
         } else if (theta >= 0.f && theta <= M_PI_2 &&
                    phi <= M_PI_2 && phi >= -M_PI_2) {
-            uf =  vec[0] / vec[1];
-            vf = -vec[2] / vec[1];
+            // front bottom
+            vf = -(vf - 1.f) * scaleh;
             v_shift = height * 0.25f;
         } else if (theta <= 0.f && theta >= -M_PI_2) {
-            uf =  vec[0] / vec[1];
-            vf =  vec[2] / vec[1];
+            // back top
+            vf = (vf - 1.f) * scaleh + 1.f;
             v_shift = height * 0.5f;
-            v_offset = -eh;
         } else {
-            uf = -vec[0] / vec[1];
-            vf =  vec[2] / vec[1];
+            // back bottom
+            uf *= -1.0f;
+            vf = (vf + 1.f) * scaleh;
             v_shift = height * 0.75f;
         }
 
-        uf = 0.5f * width / 3.f * (uf * scalew + 1.f);
-        vf = height * 0.25f * (vf * scaleh + 1.f) + v_offset;
+        uf = 0.5f * width / 3.f * (uf + 1.f);
+        vf *= height * 0.25f;
     }
 
     ui = floorf(uf);
@@ -3758,6 +3745,7 @@ static int barrelsplit_to_xyz(const V360Context *s,
     const float x = (i + 0.5f) / width;
     const float y = (j + 0.5f) / height;
     float l_x, l_y, l_z;
+    int ret;
 
     if (x < 2.f / 3.f) {
         const float scalew = s->fout_pad > 0 ? 1.f - s->fout_pad / (width * 2.f / 3.f) : 1.f - s->out_pad;
@@ -3776,59 +3764,41 @@ static int barrelsplit_to_xyz(const V360Context *s,
         l_x = cos_theta * sin_phi;
         l_y = sin_theta;
         l_z = cos_theta * cos_phi;
+
+        ret = 1;
     } else {
         const float scalew = s->fout_pad > 0 ? 1.f - s->fout_pad / (width  / 3.f) : 1.f - s->out_pad;
         const float scaleh = s->fout_pad > 0 ? 1.f - s->fout_pad / (height / 4.f) : 1.f - s->out_pad;
 
-        const int face = floorf(y * 4.f);
+        const float facef = floorf(y * 4.f);
+        const int    face = facef;
+        const float dir_vert = (face == 1 || face == 3) ? 1.0f : -1.0f;
         float uf, vf;
 
         uf = x * 3.f - 2.f;
 
         switch (face) {
-        case 0:
-            vf = y * 2.f;
+        case 0: // front top
+        case 1: // front bottom
             uf = 1.f - uf;
-            vf = 0.5f - vf;
-
-            l_x = (0.5f - uf) / scalew;
-            l_y = -0.5f;
-            l_z = (0.5f - vf) / scaleh;
+            vf = (0.5f - 2.f * y) / scaleh + facef;
             break;
-        case 1:
-            vf = y * 2.f;
-            uf = 1.f - uf;
-            vf = 1.f - (vf - 0.5f);
-
-            l_x = (0.5f - uf) / scalew;
-            l_y =  0.5f;
-            l_z = (-0.5f + vf) / scaleh;
-            break;
-        case 2:
-            vf = y * 2.f - 0.5f;
-            vf = 1.f - (1.f - vf);
-
-            l_x = (0.5f - uf) / scalew;
-            l_y = -0.5f;
-            l_z = (0.5f - vf) / scaleh;
-            break;
-        case 3:
-            vf = y * 2.f - 1.5f;
-
-            l_x = (0.5f - uf) / scalew;
-            l_y =  0.5f;
-            l_z = (-0.5f + vf) / scaleh;
+        case 2: // back top
+        case 3: // back bottom
+            vf = (y * 2.f - 1.5f) / scaleh + 3.f - facef;
             break;
         }
+        l_x = (0.5f - uf) / scalew;
+        l_y =  0.5f * dir_vert;
+        l_z = (vf - 0.5f) * dir_vert / scaleh;
+        ret = (l_x * l_x * scalew * scalew + l_z * l_z * scaleh * scaleh) < 0.5f * 0.5f;
     }
 
     vec[0] = l_x;
     vec[1] = l_y;
     vec[2] = l_z;
 
-    normalize_vector(vec);
-
-    return 1;
+    return ret;
 }
 
 /**
@@ -3883,8 +3853,6 @@ static int tspyramid_to_xyz(const V360Context *s,
         vec[1] =  1.f;
         vec[2] = -2.f * (1.f - y) / 0.375f + 1.f;
     }
-
-    normalize_vector(vec);
 
     return 1;
 }
@@ -3986,8 +3954,6 @@ static int octahedron_to_xyz(const V360Context *s,
         vec[0] = x;
         vec[1] = y;
     }
-
-    normalize_vector(vec);
 
     return 1;
 }
@@ -4261,7 +4227,7 @@ static void set_dimensions(int *outw, int *outh, int w, int h, const AVPixFmtDes
 }
 
 // Calculate remap data
-static av_always_inline int v360_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+static int v360_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
 {
     V360Context *s = ctx->priv;
     SliceXYRemap *r = &s->slice_remap[jobnr];
@@ -4293,6 +4259,8 @@ static av_always_inline int v360_slice(AVFilterContext *ctx, void *arg, int jobn
                     out_mask = s->out_transform(s, j, i, height, width, vec);
                 else
                     out_mask = s->out_transform(s, i, j, width, height, vec);
+                offset_vector(vec, s->h_offset, s->v_offset);
+                normalize_vector(vec);
                 av_assert1(!isnan(vec[0]) && !isnan(vec[1]) && !isnan(vec[2]));
                 rotate(s->rot_quaternion, vec);
                 av_assert1(!isnan(vec[0]) && !isnan(vec[1]) && !isnan(vec[2]));

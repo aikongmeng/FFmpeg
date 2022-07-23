@@ -145,8 +145,8 @@ const int *sws_getCoefficients(int colorspace)
             dst_type av_unused *r, *g, *b;                                  \
             const uint8_t *py_1 = src[0] +  y       * srcStride[0];         \
             const uint8_t *py_2 = py_1   +            srcStride[0];         \
-            const uint8_t *pu   = src[1] + (y >> 1) * srcStride[1];         \
-            const uint8_t *pv   = src[2] + (y >> 1) * srcStride[2];         \
+            const uint8_t av_unused *pu = src[1] + (y >> 1) * srcStride[1]; \
+            const uint8_t av_unused *pv = src[2] + (y >> 1) * srcStride[2]; \
             const uint8_t av_unused *pa_1, *pa_2;                           \
             unsigned int h_size = c->dstW >> 3;                             \
             if (alpha) {                                                    \
@@ -679,10 +679,11 @@ SwsFunc ff_yuv2rgb_get_func_ptr(SwsContext *c)
 {
     SwsFunc t = NULL;
 
-    if (ARCH_PPC)
-        t = ff_yuv2rgb_init_ppc(c);
-    if (ARCH_X86)
-        t = ff_yuv2rgb_init_x86(c);
+#if ARCH_PPC
+    t = ff_yuv2rgb_init_ppc(c);
+#elif ARCH_X86
+    t = ff_yuv2rgb_init_x86(c);
+#endif
 
     if (t)
         return t;

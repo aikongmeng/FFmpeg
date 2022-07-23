@@ -19,6 +19,12 @@
 #ifndef AVUTIL_VULKAN_FUNCTIONS_H
 #define AVUTIL_VULKAN_FUNCTIONS_H
 
+#define VK_NO_PROTOTYPES
+#define VK_ENABLE_BETA_EXTENSIONS
+
+#include "hwcontext.h"
+#include "hwcontext_vulkan.h"
+
 /* An enum of bitflags for every optional extension we need */
 typedef enum FFVulkanExtensions {
     FF_VK_EXT_EXTERNAL_DMABUF_MEMORY = 1ULL <<  0, /* VK_EXT_external_memory_dma_buf */
@@ -27,14 +33,19 @@ typedef enum FFVulkanExtensions {
     FF_VK_EXT_EXTERNAL_FD_SEM        = 1ULL <<  3, /* VK_KHR_external_semaphore_fd */
     FF_VK_EXT_EXTERNAL_HOST_MEMORY   = 1ULL <<  4, /* VK_EXT_external_memory_host */
     FF_VK_EXT_DEBUG_UTILS            = 1ULL <<  5, /* VK_EXT_debug_utils */
+#ifdef _WIN32
+    FF_VK_EXT_EXTERNAL_WIN32_MEMORY  = 1ULL <<  6, /* VK_KHR_external_memory_win32 */
+    FF_VK_EXT_EXTERNAL_WIN32_SEM     = 1ULL <<  7, /* VK_KHR_external_semaphore_win32 */
+#endif
 
-    FF_VK_EXT_NO_FLAG                = 1ULL << 63,
+    FF_VK_EXT_NO_FLAG                = 1ULL << 31,
 } FFVulkanExtensions;
 
 /* Macro containing every function that we utilize in our codebase */
 #define FN_LIST(MACRO)                                                                   \
     /* Instance */                                                                       \
     MACRO(0, 0, FF_VK_EXT_NO_FLAG,              EnumerateInstanceExtensionProperties)    \
+    MACRO(0, 0, FF_VK_EXT_NO_FLAG,              EnumerateInstanceLayerProperties)        \
     MACRO(0, 0, FF_VK_EXT_NO_FLAG,              CreateInstance)                          \
     MACRO(1, 0, FF_VK_EXT_NO_FLAG,              DestroyInstance)                         \
                                                                                          \
@@ -151,6 +162,11 @@ typedef enum FFVulkanExtensions {
     MACRO(1, 1, FF_VK_EXT_NO_FLAG,              CreateShaderModule)                      \
     MACRO(1, 1, FF_VK_EXT_NO_FLAG,              DestroyShaderModule)
 
+/* Macro containing every win32 specific function that we utilize in our codebase */
+#define FN_LIST_WIN32(MACRO)                                                             \
+    MACRO(1, 1, FF_VK_EXT_EXTERNAL_WIN32_SEM,    GetSemaphoreWin32HandleKHR)             \
+    MACRO(1, 1, FF_VK_EXT_EXTERNAL_WIN32_MEMORY, GetMemoryWin32HandleKHR)
+
 /* Macro to turn a function name into a definition */
 #define PFN_DEF(req_inst, req_dev, ext_flag, name) \
     PFN_vk##name name;
@@ -158,6 +174,9 @@ typedef enum FFVulkanExtensions {
 /* Structure with the definition of all listed functions */
 typedef struct FFVulkanFunctions {
     FN_LIST(PFN_DEF)
+#ifdef _WIN32
+    FN_LIST_WIN32(PFN_DEF)
+#endif
 } FFVulkanFunctions;
 
 #endif /* AVUTIL_VULKAN_FUNCTIONS_H */
