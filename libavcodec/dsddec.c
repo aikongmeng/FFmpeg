@@ -26,9 +26,11 @@
  * Direct Stream Digital (DSD) decoder
  */
 
-#include "libavcodec/internal.h"
+#include "libavutil/mem.h"
+
 #include "avcodec.h"
 #include "codec_internal.h"
+#include "decode.h"
 #include "dsd.h"
 
 #define DSD_SILENCE 0x69
@@ -54,7 +56,8 @@ static av_cold int decode_init(AVCodecContext *avctx)
     if (!s)
         return AVERROR(ENOMEM);
 
-    silence = avctx->codec_id == AV_CODEC_ID_DSD_LSBF || avctx->codec_id == AV_CODEC_ID_DSD_LSBF_PLANAR ? DSD_SILENCE_REVERSED : DSD_SILENCE;
+    silence = avctx->codec_id == AV_CODEC_ID_DSD_LSBF_PLANAR ||
+              avctx->codec_id == AV_CODEC_ID_DSD_LSBF ? DSD_SILENCE_REVERSED : DSD_SILENCE;
     for (i = 0; i < avctx->ch_layout.nb_channels; i++) {
         s[i].pos = 0;
         memset(s[i].buf, silence, sizeof(s[i].buf));
@@ -117,7 +120,7 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
 #define DSD_DECODER(id_, name_, long_name_) \
 const FFCodec ff_ ## name_ ## _decoder = { \
     .p.name       = #name_, \
-    .p.long_name  = NULL_IF_CONFIG_SMALL(long_name_), \
+    CODEC_LONG_NAME(long_name_), \
     .p.type       = AVMEDIA_TYPE_AUDIO, \
     .p.id         = AV_CODEC_ID_##id_, \
     .init         = decode_init, \

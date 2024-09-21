@@ -37,9 +37,9 @@ static const struct {
     {"<i>", "{\\i1}"}, {"</i>", "{\\i0}"},
     {"<b>", "{\\b1}"}, {"</b>", "{\\b0}"},
     {"<u>", "{\\u1}"}, {"</u>", "{\\u0}"},
-    {"{", "\\{"}, {"}", "\\}"}, // escape to avoid ASS markup conflicts
+    {"{", "\\{{}"}, {"\\", "\\\xe2\x81\xa0"}, // escape to avoid ASS markup conflicts
     {"&gt;", ">"}, {"&lt;", "<"},
-    {"&lrm;", ""}, {"&rlm;", ""}, // FIXME: properly honor bidi marks
+    {"&lrm;", "\xe2\x80\x8e"}, {"&rlm;", "\xe2\x80\x8f"},
     {"&amp;", "&"}, {"&nbsp;", "\\h"},
 };
 
@@ -100,7 +100,7 @@ static int webvtt_decode_frame(AVCodecContext *avctx, AVSubtitle *sub,
 
 const FFCodec ff_webvtt_decoder = {
     .p.name         = "webvtt",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("WebVTT subtitle"),
+    CODEC_LONG_NAME("WebVTT subtitle"),
     .p.type         = AVMEDIA_TYPE_SUBTITLE,
     .p.id           = AV_CODEC_ID_WEBVTT,
     FF_CODEC_DECODE_SUB_CB(webvtt_decode_frame),

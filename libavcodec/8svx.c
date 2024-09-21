@@ -40,9 +40,10 @@
 #include "config_components.h"
 
 #include "libavutil/avassert.h"
+#include "libavutil/mem.h"
 #include "avcodec.h"
 #include "codec_internal.h"
-#include "internal.h"
+#include "decode.h"
 #include "libavutil/common.h"
 
 /** decoder context */
@@ -151,7 +152,7 @@ static int eightsvx_decode_frame(AVCodecContext *avctx, AVFrame *frame,
 
     *got_frame_ptr = 1;
 
-    return ((avctx->frame_number == 0) * hdr_size + buf_size) * channels;
+    return ((avctx->frame_num == 0) * hdr_size + buf_size) * channels;
 }
 
 static av_cold int eightsvx_decode_init(AVCodecContext *avctx)
@@ -189,7 +190,7 @@ static av_cold int eightsvx_decode_close(AVCodecContext *avctx)
 #if CONFIG_EIGHTSVX_FIB_DECODER
 const FFCodec ff_eightsvx_fib_decoder = {
   .p.name         = "8svx_fib",
-  .p.long_name    = NULL_IF_CONFIG_SMALL("8SVX fibonacci"),
+  CODEC_LONG_NAME("8SVX fibonacci"),
   .p.type         = AVMEDIA_TYPE_AUDIO,
   .p.id           = AV_CODEC_ID_8SVX_FIB,
   .priv_data_size = sizeof (EightSvxContext),
@@ -204,7 +205,7 @@ const FFCodec ff_eightsvx_fib_decoder = {
 #if CONFIG_EIGHTSVX_EXP_DECODER
 const FFCodec ff_eightsvx_exp_decoder = {
   .p.name         = "8svx_exp",
-  .p.long_name    = NULL_IF_CONFIG_SMALL("8SVX exponential"),
+  CODEC_LONG_NAME("8SVX exponential"),
   .p.type         = AVMEDIA_TYPE_AUDIO,
   .p.id           = AV_CODEC_ID_8SVX_EXP,
   .priv_data_size = sizeof (EightSvxContext),

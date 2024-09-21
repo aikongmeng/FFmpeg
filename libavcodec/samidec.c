@@ -27,6 +27,7 @@
 #include "ass.h"
 #include "libavutil/avstring.h"
 #include "libavutil/bprint.h"
+#include "libavutil/mem.h"
 #include "codec_internal.h"
 #include "htmlsubtitles.h"
 
@@ -182,7 +183,7 @@ static void sami_flush(AVCodecContext *avctx)
 
 const FFCodec ff_sami_decoder = {
     .p.name         = "sami",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("SAMI subtitle"),
+    CODEC_LONG_NAME("SAMI subtitle"),
     .p.type         = AVMEDIA_TYPE_SUBTITLE,
     .p.id           = AV_CODEC_ID_SAMI,
     .priv_data_size = sizeof(SAMIContext),

@@ -25,13 +25,13 @@
  */
 
 #include "libavutil/imgutils.h"
+#include "libavutil/mem.h"
 
 #define BITSTREAM_READER_LE
 #include "avcodec.h"
 #include "codec_internal.h"
 #include "get_bits.h"
 #include "lossless_videodsp.h"
-#include "mathops.h"
 #include "thread.h"
 
 typedef struct VBLEContext {
@@ -134,10 +134,6 @@ static int vble_decode_frame(AVCodecContext *avctx, AVFrame *pic,
     if ((ret = ff_thread_get_buffer(avctx, pic, 0)) < 0)
         return ret;
 
-    /* Set flags */
-    pic->key_frame = 1;
-    pic->pict_type = AV_PICTURE_TYPE_I;
-
     /* Version should always be 1 */
     version = AV_RL32(src);
 
@@ -191,6 +187,9 @@ static av_cold int vble_decode_init(AVCodecContext *avctx)
     ctx->size = av_image_get_buffer_size(avctx->pix_fmt,
                                          avctx->width, avctx->height, 1);
 
+    if (ctx->size < 0)
+        return ctx->size;
+
     ctx->val = av_malloc_array(ctx->size, sizeof(*ctx->val));
 
     if (!ctx->val) {
@@ -203,7 +202,7 @@ static av_cold int vble_decode_init(AVCodecContext *avctx)
 
 const FFCodec ff_vble_decoder = {
     .p.name         = "vble",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("VBLE Lossless Codec"),
+    CODEC_LONG_NAME("VBLE Lossless Codec"),
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_VBLE,
     .priv_data_size = sizeof(VBLEContext),

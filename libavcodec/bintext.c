@@ -36,7 +36,7 @@
 #include "cga_data.h"
 #include "bintext.h"
 #include "codec_internal.h"
-#include "internal.h"
+#include "decode.h"
 
 #define FONT_WIDTH 8
 
@@ -157,7 +157,11 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
     if ((ret = ff_get_buffer(avctx, s->frame, 0)) < 0)
         return ret;
     s->frame->pict_type           = AV_PICTURE_TYPE_I;
+#if FF_API_PALETTE_HAS_CHANGED
+FF_DISABLE_DEPRECATION_WARNINGS
     s->frame->palette_has_changed = 1;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
     memcpy(s->frame->data[1], s->palette, 16 * 4);
 
     if (avctx->codec_id == AV_CODEC_ID_XBIN) {
@@ -219,7 +223,7 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
 #if CONFIG_BINTEXT_DECODER
 const FFCodec ff_bintext_decoder = {
     .p.name         = "bintext",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("Binary text"),
+    CODEC_LONG_NAME("Binary text"),
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_BINTEXT,
     .priv_data_size = sizeof(XbinContext),
@@ -231,7 +235,7 @@ const FFCodec ff_bintext_decoder = {
 #if CONFIG_XBIN_DECODER
 const FFCodec ff_xbin_decoder = {
     .p.name         = "xbin",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("eXtended BINary text"),
+    CODEC_LONG_NAME("eXtended BINary text"),
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_XBIN,
     .priv_data_size = sizeof(XbinContext),
@@ -243,7 +247,7 @@ const FFCodec ff_xbin_decoder = {
 #if CONFIG_IDF_DECODER
 const FFCodec ff_idf_decoder = {
     .p.name         = "idf",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("iCEDraw text"),
+    CODEC_LONG_NAME("iCEDraw text"),
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_IDF,
     .priv_data_size = sizeof(XbinContext),
