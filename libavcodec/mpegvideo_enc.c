@@ -75,7 +75,7 @@
 #include "wmv2enc.h"
 #include "rv10enc.h"
 #include "packet_internal.h"
-#include "refstruct.h"
+#include "libavutil/refstruct.h"
 #include <limits.h>
 #include "sp5x.h"
 
@@ -133,11 +133,11 @@ void ff_convert_matrix(MpegEncContext *s, int (*qmat)[64],
             for (i = 0; i < 64; i++) {
                 const int j = s->idsp.idct_permutation[i];
                 int64_t den = (int64_t) qscale2 * quant_matrix[j];
-                /* 16 <= qscale * quant_matrix[i] <= 7905
-                 * Assume x = ff_aanscales[i] * qscale * quant_matrix[i]
-                 *             19952 <=              x  <= 249205026
-                 * (1 << 36) / 19952 >= (1 << 36) / (x) >= (1 << 36) / 249205026
-                 *           3444240 >= (1 << 36) / (x) >= 275 */
+                /* 1 * 1 <= qscale2 * quant_matrix[j] <= 112 * 255
+                 * Assume x = qscale2 * quant_matrix[j]
+                 *                 1 <=              x  <= 28560
+                 *     (1 << 22) / 1 >= (1 << 22) / (x) >= (1 << 22) / 28560
+                 *           4194304 >= (1 << 22) / (x) >= 146 */
 
                 qmat[qscale][i] = (int)((UINT64_C(2) << QMAT_SHIFT) / den);
             }
@@ -145,11 +145,11 @@ void ff_convert_matrix(MpegEncContext *s, int (*qmat)[64],
             for (i = 0; i < 64; i++) {
                 const int j = s->idsp.idct_permutation[i];
                 int64_t den = ff_aanscales[i] * (int64_t) qscale2 * quant_matrix[j];
-                /* 16 <= qscale * quant_matrix[i] <= 7905
-                 * Assume x = ff_aanscales[i] * qscale * quant_matrix[i]
-                 *             19952 <=              x  <= 249205026
-                 * (1 << 36) / 19952 >= (1 << 36) / (x) >= (1 << 36) / 249205026
-                 *           3444240 >= (1 << 36) / (x) >= 275 */
+                /* 1247 * 1 * 1 <= ff_aanscales[i] * qscale2 * quant_matrix[j] <= 31521 * 112 * 255
+                 * Assume x = ff_aanscales[i] * qscale2 * quant_matrix[j]
+                 *              1247 <=              x  <= 900239760
+                 *  (1 << 36) / 1247 >= (1 << 36) / (x) >= (1 << 36) / 900239760
+                 *          55107840 >= (1 << 36) / (x) >= 76 */
 
                 qmat[qscale][i] = (int)((UINT64_C(2) << (QMAT_SHIFT + 14)) / den);
             }
@@ -157,14 +157,17 @@ void ff_convert_matrix(MpegEncContext *s, int (*qmat)[64],
             for (i = 0; i < 64; i++) {
                 const int j = s->idsp.idct_permutation[i];
                 int64_t den = (int64_t) qscale2 * quant_matrix[j];
-                /* We can safely suppose that 16 <= quant_matrix[i] <= 255
-                 * Assume x = qscale * quant_matrix[i]
-                 * So             16 <=              x  <= 7905
-                 * so (1 << 19) / 16 >= (1 << 19) / (x) >= (1 << 19) / 7905
-                 * so          32768 >= (1 << 19) / (x) >= 67 */
+                /* 1 * 1 <= qscale2 * quant_matrix[j] <= 112 * 255
+                 * Assume x = qscale2 * quant_matrix[j]
+                 *                 1 <=              x  <= 28560
+                 *     (1 << 22) / 1 >= (1 << 22) / (x) >= (1 << 22) / 28560
+                 *           4194304 >= (1 << 22) / (x) >= 146
+                 *
+                 *                 1 <=              x  <= 28560
+                 *     (1 << 17) / 1 >= (1 << 17) / (x) >= (1 << 17) / 28560
+                 *            131072 >= (1 << 17) / (x) >= 4 */
+
                 qmat[qscale][i] = (int)((UINT64_C(2) << QMAT_SHIFT) / den);
-                //qmat  [qscale][i] = (1 << QMAT_SHIFT_MMX) /
-                //                    (qscale * quant_matrix[i]);
                 qmat16[qscale][0][i] = (2 << QMAT_SHIFT_MMX) / den;
 
                 if (qmat16[qscale][0][i] == 0 ||
@@ -565,6 +568,12 @@ av_cold int ff_mpv_encode_init(AVCodecContext *avctx)
         (avctx->width  > 2048 ||
          avctx->height > 1152 )) {
         av_log(avctx, AV_LOG_ERROR, "H.263 does not support resolutions above 2048x1152\n");
+        return AVERROR(EINVAL);
+    }
+    if (s->codec_id == AV_CODEC_ID_FLV1 &&
+        (avctx->width  > 65535 ||
+         avctx->height > 65535 )) {
+        av_log(avctx, AV_LOG_ERROR, "FLV does not support resolutions above 16bit\n");
         return AVERROR(EINVAL);
     }
     if ((s->codec_id == AV_CODEC_ID_H263  ||
@@ -987,6 +996,10 @@ av_cold int ff_mpv_encode_init(AVCodecContext *avctx)
     /* precompute matrix */
     /* for mjpeg, we do include qscale in the matrix */
     if (s->out_format != FMT_MJPEG) {
+        ret = ff_check_codec_matrices(avctx, FF_MATRIX_TYPE_INTRA | FF_MATRIX_TYPE_INTER, 1, 255);
+        if (ret < 0)
+            return ret;
+
         ff_convert_matrix(s, s->q_intra_matrix, s->q_intra_matrix16,
                           s->intra_matrix, s->intra_quant_bias, avctx->qmin,
                           31, 1);
@@ -1033,12 +1046,12 @@ av_cold int ff_mpv_encode_end(AVCodecContext *avctx)
     ff_rate_control_uninit(&s->rc_context);
 
     ff_mpv_common_end(s);
-    ff_refstruct_pool_uninit(&s->picture_pool);
+    av_refstruct_pool_uninit(&s->picture_pool);
 
     if (s->input_picture && s->reordered_input_picture) {
         for (int i = 0; i < MAX_B_FRAMES + 1; i++) {
-            ff_refstruct_unref(&s->input_picture[i]);
-            ff_refstruct_unref(&s->reordered_input_picture[i]);
+            av_refstruct_unref(&s->input_picture[i]);
+            av_refstruct_unref(&s->reordered_input_picture[i]);
         }
     }
     for (i = 0; i < FF_ARRAY_ELEMS(s->tmp_frames); i++)
@@ -1082,11 +1095,33 @@ av_cold int ff_mpv_encode_end(AVCodecContext *avctx)
     return 0;
 }
 
-#define IS_ENCODER 1
-#include "mpv_reconstruct_mb_template.c"
+/* put block[] to dest[] */
+static inline void put_dct(MpegEncContext *s,
+                           int16_t *block, int i, uint8_t *dest, int line_size, int qscale)
+{
+    s->dct_unquantize_intra(s, block, i, qscale);
+    s->idsp.idct_put(dest, line_size, block);
+}
 
+static inline void add_dequant_dct(MpegEncContext *s,
+                           int16_t *block, int i, uint8_t *dest, int line_size, int qscale)
+{
+    if (s->block_last_index[i] >= 0) {
+        s->dct_unquantize_inter(s, block, i, qscale);
+
+        s->idsp.idct_add(dest, line_size, block);
+    }
+}
+
+/**
+ * Performs dequantization and IDCT (if necessary)
+ */
 static void mpv_reconstruct_mb(MpegEncContext *s, int16_t block[12][64])
 {
+    const int mb_xy = s->mb_y * s->mb_stride + s->mb_x;
+
+    s->cur_pic.qscale_table[mb_xy] = s->qscale;
+
     if (s->avctx->debug & FF_DEBUG_DCT_COEFF) {
        /* print DCT coefficients */
        av_log(s->avctx, AV_LOG_DEBUG, "DCT coeffs of MB at %dx%d:\n", s->mb_x, s->mb_y);
@@ -1099,7 +1134,60 @@ static void mpv_reconstruct_mb(MpegEncContext *s, int16_t block[12][64])
        }
     }
 
-    mpv_reconstruct_mb_internal(s, block, 0, MAY_BE_MPEG12_H261);
+    if ((s->avctx->flags & AV_CODEC_FLAG_PSNR) || s->frame_skip_threshold || s->frame_skip_factor ||
+        !((s->intra_only || s->pict_type == AV_PICTURE_TYPE_B) &&
+          s->avctx->mb_decision != FF_MB_DECISION_RD)) { // FIXME precalc
+        uint8_t *dest_y = s->dest[0], *dest_cb = s->dest[1], *dest_cr = s->dest[2];
+        int dct_linesize, dct_offset;
+        const int linesize   = s->cur_pic.linesize[0];
+        const int uvlinesize = s->cur_pic.linesize[1];
+        const int block_size = 8;
+
+        dct_linesize = linesize << s->interlaced_dct;
+        dct_offset   = s->interlaced_dct ? linesize : linesize * block_size;
+
+        if (!s->mb_intra) {
+            /* No MC, as that was already done otherwise */
+            add_dequant_dct(s, block[0], 0, dest_y                          , dct_linesize, s->qscale);
+            add_dequant_dct(s, block[1], 1, dest_y              + block_size, dct_linesize, s->qscale);
+            add_dequant_dct(s, block[2], 2, dest_y + dct_offset             , dct_linesize, s->qscale);
+            add_dequant_dct(s, block[3], 3, dest_y + dct_offset + block_size, dct_linesize, s->qscale);
+
+            if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+                if (s->chroma_y_shift) {
+                    add_dequant_dct(s, block[4], 4, dest_cb, uvlinesize, s->chroma_qscale);
+                    add_dequant_dct(s, block[5], 5, dest_cr, uvlinesize, s->chroma_qscale);
+                } else {
+                    dct_linesize >>= 1;
+                    dct_offset   >>= 1;
+                    add_dequant_dct(s, block[4], 4, dest_cb,              dct_linesize, s->chroma_qscale);
+                    add_dequant_dct(s, block[5], 5, dest_cr,              dct_linesize, s->chroma_qscale);
+                    add_dequant_dct(s, block[6], 6, dest_cb + dct_offset, dct_linesize, s->chroma_qscale);
+                    add_dequant_dct(s, block[7], 7, dest_cr + dct_offset, dct_linesize, s->chroma_qscale);
+                }
+            }
+        } else {
+            /* dct only in intra block */
+            put_dct(s, block[0], 0, dest_y                          , dct_linesize, s->qscale);
+            put_dct(s, block[1], 1, dest_y              + block_size, dct_linesize, s->qscale);
+            put_dct(s, block[2], 2, dest_y + dct_offset             , dct_linesize, s->qscale);
+            put_dct(s, block[3], 3, dest_y + dct_offset + block_size, dct_linesize, s->qscale);
+
+            if (!CONFIG_GRAY || !(s->avctx->flags & AV_CODEC_FLAG_GRAY)) {
+                if (s->chroma_y_shift) {
+                    put_dct(s, block[4], 4, dest_cb, uvlinesize, s->chroma_qscale);
+                    put_dct(s, block[5], 5, dest_cr, uvlinesize, s->chroma_qscale);
+                } else {
+                    dct_offset   >>= 1;
+                    dct_linesize >>= 1;
+                    put_dct(s, block[4], 4, dest_cb,              dct_linesize, s->chroma_qscale);
+                    put_dct(s, block[5], 5, dest_cr,              dct_linesize, s->chroma_qscale);
+                    put_dct(s, block[6], 6, dest_cb + dct_offset, dct_linesize, s->chroma_qscale);
+                    put_dct(s, block[7], 7, dest_cr + dct_offset, dct_linesize, s->chroma_qscale);
+                }
+            }
+        }
+    }
 }
 
 static int get_sae(const uint8_t *src, int ref, int stride)
@@ -1232,7 +1320,7 @@ static int load_input_picture(MpegEncContext *s, const AVFrame *pic_arg)
         ff_dlog(s->avctx, "%d %d %"PTRDIFF_SPECIFIER" %"PTRDIFF_SPECIFIER"\n", pic_arg->linesize[0],
                 pic_arg->linesize[1], s->linesize, s->uvlinesize);
 
-        pic = ff_refstruct_pool_get(s->picture_pool);
+        pic = av_refstruct_pool_get(s->picture_pool);
         if (!pic)
             return AVERROR(ENOMEM);
 
@@ -1311,7 +1399,7 @@ static int load_input_picture(MpegEncContext *s, const AVFrame *pic_arg)
 
     return 0;
 fail:
-    ff_refstruct_unref(&pic);
+    av_refstruct_unref(&pic);
     return ret;
 }
 
@@ -1541,7 +1629,7 @@ static int set_bframe_chain_length(MpegEncContext *s)
             s->next_pic.ptr &&
             skip_check(s, s->input_picture[0], s->next_pic.ptr)) {
             // FIXME check that the gop check above is +-1 correct
-            ff_refstruct_unref(&s->input_picture[0]);
+            av_refstruct_unref(&s->input_picture[0]);
 
             ff_vbv_update(s, 0);
 
@@ -1607,7 +1695,7 @@ static int set_bframe_chain_length(MpegEncContext *s)
         } else if (s->b_frame_strategy == 2) {
             b_frames = estimate_best_b_count(s);
             if (b_frames < 0) {
-                ff_refstruct_unref(&s->input_picture[0]);
+                av_refstruct_unref(&s->input_picture[0]);
                 return b_frames;
             }
         }
@@ -1714,7 +1802,7 @@ static int select_input_picture(MpegEncContext *s)
     }
     return 0;
 fail:
-    ff_refstruct_unref(&s->reordered_input_picture[0]);
+    av_refstruct_unref(&s->reordered_input_picture[0]);
     return ret;
 }
 
@@ -3192,12 +3280,7 @@ static int encode_thread(AVCodecContext *c, void *arg){
                     s->mv[0][0][1] = 0;
                     encode_mb_hq(s, &backup_s, &best_s, pb, pb2, tex_pb,
                                  &dmin, &next_block, 0, 0);
-                    if(s->h263_pred || s->h263_aic){
-                        if(best_s.mb_intra)
-                            s->mbintra_table[mb_x + mb_y*s->mb_stride]=1;
-                        else
-                            ff_clean_intra_table_entries(s); //old mode?
-                    }
+                    s->mbintra_table[xy] = 1;
                 }
 
                 if ((s->mpv_flags & FF_MPV_FLAG_QP_RD) && dmin < INT_MAX) {
@@ -3344,6 +3427,7 @@ static int encode_thread(AVCodecContext *c, void *arg){
                     s->mb_intra= 1;
                     motion_x= s->mv[0][0][0] = 0;
                     motion_y= s->mv[0][0][1] = 0;
+                    s->mbintra_table[xy] = 1;
                     break;
                 case CANDIDATE_MB_TYPE_INTER:
                     s->mv_dir = MV_DIR_FORWARD;
@@ -3458,7 +3542,8 @@ static int encode_thread(AVCodecContext *c, void *arg){
             if(s->mb_intra /* && I,P,S_TYPE */){
                 s->p_mv_table[xy][0]=0;
                 s->p_mv_table[xy][1]=0;
-            }
+            } else if ((s->h263_pred || s->h263_aic) && s->mbintra_table[xy])
+                ff_clean_intra_table_entries(s);
 
             if (s->avctx->flags & AV_CODEC_FLAG_PSNR) {
                 int w= 16;
@@ -3754,6 +3839,10 @@ static int encode_picture(MpegEncContext *s, const AVPacket *pkt)
         const uint16_t *  luma_matrix = ff_mpeg1_default_intra_matrix;
         const uint16_t *chroma_matrix = ff_mpeg1_default_intra_matrix;
 
+        ret = ff_check_codec_matrices(s->avctx, FF_MATRIX_TYPE_INTRA | FF_MATRIX_TYPE_CHROMA_INTRA, (7 + s->qscale) / s->qscale, 65535);
+        if (ret < 0)
+            return ret;
+
         if (s->avctx->intra_matrix) {
             chroma_matrix =
             luma_matrix = s->avctx->intra_matrix;
@@ -3981,9 +4070,9 @@ static int dct_quantize_trellis_c(MpegEncContext *s,
 
     for(i=63; i>=start_i; i--) {
         const int j = scantable[i];
-        int level = block[j] * qmat[j];
+        int64_t level = (int64_t)block[j] * qmat[j];
 
-        if(((unsigned)(level+threshold1))>threshold2){
+        if(((uint64_t)(level+threshold1))>threshold2){
             last_non_zero = i;
             break;
         }
@@ -3991,11 +4080,11 @@ static int dct_quantize_trellis_c(MpegEncContext *s,
 
     for(i=start_i; i<=last_non_zero; i++) {
         const int j = scantable[i];
-        int level = block[j] * qmat[j];
+        int64_t level = (int64_t)block[j] * qmat[j];
 
 //        if(   bias+level >= (1<<(QMAT_SHIFT - 3))
 //           || bias-level >= (1<<(QMAT_SHIFT - 3))){
-        if(((unsigned)(level+threshold1))>threshold2){
+        if(((uint64_t)(level+threshold1))>threshold2){
             if(level>0){
                 level= (bias + level)>>QMAT_SHIFT;
                 coeff[0][i]= level;
@@ -4584,7 +4673,7 @@ static int dct_quantize_c(MpegEncContext *s,
                           int16_t *block, int n,
                           int qscale, int *overflow)
 {
-    int i, j, level, last_non_zero, q, start_i;
+    int i, last_non_zero, q, start_i;
     const int *qmat;
     const uint8_t *scantable;
     int bias;
@@ -4624,10 +4713,10 @@ static int dct_quantize_c(MpegEncContext *s,
     threshold1= (1<<QMAT_SHIFT) - bias - 1;
     threshold2= (threshold1<<1);
     for(i=63;i>=start_i;i--) {
-        j = scantable[i];
-        level = block[j] * qmat[j];
+        const int j = scantable[i];
+        int64_t level = (int64_t)block[j] * qmat[j];
 
-        if(((unsigned)(level+threshold1))>threshold2){
+        if(((uint64_t)(level+threshold1))>threshold2){
             last_non_zero = i;
             break;
         }else{
@@ -4635,12 +4724,12 @@ static int dct_quantize_c(MpegEncContext *s,
         }
     }
     for(i=start_i; i<=last_non_zero; i++) {
-        j = scantable[i];
-        level = block[j] * qmat[j];
+        const int j = scantable[i];
+        int64_t level = (int64_t)block[j] * qmat[j];
 
 //        if(   bias+level >= (1<<QMAT_SHIFT)
 //           || bias-level >= (1<<QMAT_SHIFT)){
-        if(((unsigned)(level+threshold1))>threshold2){
+        if(((uint64_t)(level+threshold1))>threshold2){
             if(level>0){
                 level= (bias + level)>>QMAT_SHIFT;
                 block[j]= level;

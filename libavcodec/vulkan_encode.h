@@ -188,7 +188,7 @@ typedef struct FFVulkanEncodeContext {
     VkVideoEncodeCapabilitiesKHR enc_caps;
     VkVideoEncodeUsageInfoKHR usage_info;
 
-    FFVkQueueFamilyCtx qf_enc;
+    AVVulkanDeviceQueueFamily *qf_enc;
     FFVkExecPool enc_pool;
 
     FFHWBaseEncodePicture *slots[32];
@@ -244,6 +244,12 @@ int ff_vulkan_encode_receive_packet(AVCodecContext *avctx, AVPacket *pkt);
  * Uninitialize encoder.
  */
 void ff_vulkan_encode_uninit(FFVulkanEncodeContext *ctx);
+
+/**
+ * Create session parameters.
+ */
+int ff_vulkan_encode_create_session_params(AVCodecContext *avctx, FFVulkanEncodeContext *ctx,
+                                           void *codec_params_pnext);
 
 /**
  * Paperwork.
