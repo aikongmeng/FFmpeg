@@ -22,6 +22,7 @@
 #include "avcodec.h"
 #include "codec_internal.h"
 #include "encode.h"
+#include "exif_internal.h"
 #include "bytestream.h"
 #include "lossless_videoencdsp.h"
 #include "png.h"
@@ -29,6 +30,7 @@
 #include "zlib_wrapper.h"
 
 #include "libavutil/avassert.h"
+#include "libavutil/buffer.h"
 #include "libavutil/crc.h"
 #include "libavutil/csp.h"
 #include "libavutil/libm.h"
@@ -373,6 +375,7 @@ static int encode_headers(AVCodecContext *avctx, const AVFrame *pict)
 {
     AVFrameSideData *side_data;
     PNGEncContext *s = avctx->priv_data;
+    AVBufferRef *exif_data = NULL;
     int ret;
 
     /* write png header */
@@ -412,6 +415,19 @@ static int encode_headers(AVCodecContext *avctx, const AVFrame *pict)
                 av_log(avctx, AV_LOG_WARNING, "Only side-by-side stereo3d flag can be defined within sTER chunk\n");
                 break;
         }
+    }
+
+    ret = ff_exif_get_buffer(avctx, pict, &exif_data, AV_EXIF_TIFF_HEADER);
+    if (exif_data) {
+        // png_write_chunk accepts an int, not a size_t, so we have to check overflow
+        if (exif_data->size > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE)
+            // that's a very big exif chunk, probably a bug
+            av_log(avctx, AV_LOG_ERROR, "extremely large EXIF buffer detected, not writing\n");
+        else
+            png_write_chunk(&s->bytestream, MKTAG('e','X','I','f'), exif_data->data, exif_data->size);
+        av_buffer_unref(&exif_data);
+    } else if (ret < 0) {
+        av_log(avctx, AV_LOG_WARNING, "unable to attach EXIF metadata: %s\n", av_err2str(ret));
     }
 
     side_data = av_frame_get_side_data(pict, AV_FRAME_DATA_ICC_PROFILE);
@@ -1205,7 +1221,7 @@ static av_cold int png_enc_close(AVCodecContext *avctx)
 static const AVOption options[] = {
     {"dpi", "Set image resolution (in dots per inch)",  OFFSET(dpi), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 0x10000, VE},
     {"dpm", "Set image resolution (in dots per meter)", OFFSET(dpm), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 0x10000, VE},
-    { "pred", "Prediction method", OFFSET(filter_type), AV_OPT_TYPE_INT, { .i64 = PNG_FILTER_VALUE_NONE }, PNG_FILTER_VALUE_NONE, PNG_FILTER_VALUE_MIXED, VE, .unit = "pred" },
+    { "pred", "Prediction method", OFFSET(filter_type), AV_OPT_TYPE_INT, { .i64 = PNG_FILTER_VALUE_PAETH }, PNG_FILTER_VALUE_NONE, PNG_FILTER_VALUE_MIXED, VE, .unit = "pred" },
         { "none",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = PNG_FILTER_VALUE_NONE },  INT_MIN, INT_MAX, VE, .unit = "pred" },
         { "sub",   NULL, 0, AV_OPT_TYPE_CONST, { .i64 = PNG_FILTER_VALUE_SUB },   INT_MIN, INT_MAX, VE, .unit = "pred" },
         { "up",    NULL, 0, AV_OPT_TYPE_CONST, { .i64 = PNG_FILTER_VALUE_UP },    INT_MIN, INT_MAX, VE, .unit = "pred" },
@@ -1233,13 +1249,14 @@ const FFCodec ff_png_encoder = {
     .init           = png_enc_init,
     .close          = png_enc_close,
     FF_CODEC_ENCODE_CB(encode_png),
-    .p.pix_fmts     = (const enum AVPixelFormat[]) {
-        AV_PIX_FMT_RGB24, AV_PIX_FMT_RGBA,
-        AV_PIX_FMT_RGB48BE, AV_PIX_FMT_RGBA64BE,
-        AV_PIX_FMT_PAL8,
-        AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY8A,
-        AV_PIX_FMT_GRAY16BE, AV_PIX_FMT_YA16BE,
-        AV_PIX_FMT_MONOBLACK, AV_PIX_FMT_NONE
+    CODEC_PIXFMTS(AV_PIX_FMT_RGB24, AV_PIX_FMT_RGBA,
+                  AV_PIX_FMT_RGB48BE, AV_PIX_FMT_RGBA64BE,
+                  AV_PIX_FMT_PAL8,
+                  AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY8A,
+                  AV_PIX_FMT_GRAY16BE, AV_PIX_FMT_YA16BE,
+                  AV_PIX_FMT_MONOBLACK),
+    .alpha_modes    = (const enum AVAlphaMode[]) {
+        AVALPHA_MODE_STRAIGHT, AVALPHA_MODE_UNSPECIFIED
     },
     .p.priv_class   = &pngenc_class,
     .caps_internal  = FF_CODEC_CAP_ICC_PROFILES,
@@ -1256,13 +1273,13 @@ const FFCodec ff_apng_encoder = {
     .init           = png_enc_init,
     .close          = png_enc_close,
     FF_CODEC_ENCODE_CB(encode_apng),
-    .p.pix_fmts     = (const enum AVPixelFormat[]) {
-        AV_PIX_FMT_RGB24, AV_PIX_FMT_RGBA,
-        AV_PIX_FMT_RGB48BE, AV_PIX_FMT_RGBA64BE,
-        AV_PIX_FMT_PAL8,
-        AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY8A,
-        AV_PIX_FMT_GRAY16BE, AV_PIX_FMT_YA16BE,
-        AV_PIX_FMT_NONE
+    CODEC_PIXFMTS(AV_PIX_FMT_RGB24, AV_PIX_FMT_RGBA,
+                  AV_PIX_FMT_RGB48BE, AV_PIX_FMT_RGBA64BE,
+                  AV_PIX_FMT_PAL8,
+                  AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY8A,
+                  AV_PIX_FMT_GRAY16BE, AV_PIX_FMT_YA16BE),
+    .alpha_modes    = (const enum AVAlphaMode[]) {
+        AVALPHA_MODE_STRAIGHT, AVALPHA_MODE_UNSPECIFIED
     },
     .p.priv_class   = &pngenc_class,
     .caps_internal  = FF_CODEC_CAP_ICC_PROFILES,

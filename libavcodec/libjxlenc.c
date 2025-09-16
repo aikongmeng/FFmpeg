@@ -28,6 +28,7 @@
 
 #include "libavutil/avutil.h"
 #include "libavutil/csp.h"
+#include "libavutil/display.h"
 #include "libavutil/error.h"
 #include "libavutil/frame.h"
 #include "libavutil/libm.h"
@@ -40,6 +41,7 @@
 #include "avcodec.h"
 #include "encode.h"
 #include "codec_internal.h"
+#include "exif_internal.h"
 
 #include <jxl/encode.h>
 #include <jxl/thread_parallel_runner.h>
@@ -93,7 +95,7 @@ static float quality_to_distance(float quality)
 }
 
 /**
- * Initalize the encoder on a per-file basis. All of these need to be set
+ * Initialize the encoder on a per-file basis. All of these need to be set
  * once each time the encoder is reset, which is each frame for still
  * images, to make the image2 muxer work. For animation this is run once.
  *
@@ -247,82 +249,12 @@ static int libjxl_populate_primaries(void *avctx, JxlColorEncoding *jxl_color, e
     return 0;
 }
 
-/**
- * Sends metadata to libjxl based on the first frame of the stream, such as pixel format,
- * orientation, bit depth, and that sort of thing.
- */
-static int libjxl_preprocess_stream(AVCodecContext *avctx, const AVFrame *frame, int animated)
+static int libjxl_populate_colorspace(AVCodecContext *avctx, const AVFrame *frame,
+                                      const AVPixFmtDescriptor *pix_desc, const JxlBasicInfo *info)
 {
+    JxlColorEncoding jxl_color;
     LibJxlEncodeContext *ctx = avctx->priv_data;
     int ret;
-    AVFrameSideData *sd;
-    const AVPixFmtDescriptor *pix_desc = av_pix_fmt_desc_get(frame->format);
-    JxlBasicInfo info;
-    JxlColorEncoding jxl_color;
-    JxlPixelFormat *jxl_fmt = &ctx->jxl_fmt;
-    int bits_per_sample;
-#if JPEGXL_NUMERIC_VERSION >= JPEGXL_COMPUTE_NUMERIC_VERSION(0, 8, 0)
-    JxlBitDepth jxl_bit_depth;
-#endif
-
-    /* populate the basic info settings */
-    JxlEncoderInitBasicInfo(&info);
-    jxl_fmt->num_channels = pix_desc->nb_components;
-    info.xsize = frame->width;
-    info.ysize = frame->height;
-    info.num_extra_channels = (jxl_fmt->num_channels + 1) & 0x1;
-    info.num_color_channels = jxl_fmt->num_channels - info.num_extra_channels;
-    bits_per_sample = av_get_bits_per_pixel(pix_desc) / jxl_fmt->num_channels;
-    info.bits_per_sample = avctx->bits_per_raw_sample > 0 && !(pix_desc->flags & AV_PIX_FMT_FLAG_FLOAT)
-                           ? avctx->bits_per_raw_sample : bits_per_sample;
-    info.alpha_bits = (info.num_extra_channels > 0) * info.bits_per_sample;
-    if (pix_desc->flags & AV_PIX_FMT_FLAG_FLOAT) {
-        info.exponent_bits_per_sample = info.bits_per_sample > 16 ? 8 : 5;
-        info.alpha_exponent_bits = info.alpha_bits ? info.exponent_bits_per_sample : 0;
-        jxl_fmt->data_type = info.bits_per_sample > 16 ? JXL_TYPE_FLOAT : JXL_TYPE_FLOAT16;
-    } else {
-        info.exponent_bits_per_sample = 0;
-        info.alpha_exponent_bits = 0;
-        jxl_fmt->data_type = info.bits_per_sample <= 8 ? JXL_TYPE_UINT8 : JXL_TYPE_UINT16;
-    }
-
-#if JPEGXL_NUMERIC_VERSION >= JPEGXL_COMPUTE_NUMERIC_VERSION(0, 8, 0)
-    jxl_bit_depth.bits_per_sample = bits_per_sample;
-    jxl_bit_depth.type = JXL_BIT_DEPTH_FROM_PIXEL_FORMAT;
-    jxl_bit_depth.exponent_bits_per_sample = pix_desc->flags & AV_PIX_FMT_FLAG_FLOAT ?
-                                             info.exponent_bits_per_sample : 0;
-#endif
-
-    /* JPEG XL format itself does not support limited range */
-    if (avctx->color_range == AVCOL_RANGE_MPEG ||
-        avctx->color_range == AVCOL_RANGE_UNSPECIFIED && frame->color_range == AVCOL_RANGE_MPEG)
-        av_log(avctx, AV_LOG_WARNING, "This encoder does not support limited (tv) range, colors will be wrong!\n");
-    else if (avctx->color_range != AVCOL_RANGE_JPEG && frame->color_range != AVCOL_RANGE_JPEG)
-        av_log(avctx, AV_LOG_WARNING, "Unknown color range, assuming full (pc)\n");
-
-    /* bitexact lossless requires there to be no XYB transform */
-    info.uses_original_profile = ctx->distance == 0.0 || !ctx->xyb;
-
-    /* libjxl doesn't support negative linesizes so we use orientation to work around this */
-    info.orientation = frame->linesize[0] >= 0 ? JXL_ORIENT_IDENTITY : JXL_ORIENT_FLIP_VERTICAL;
-
-    if (animated) {
-        info.have_animation = 1;
-        info.animation.have_timecodes = 0;
-        info.animation.num_loops = 0;
-        /* avctx->timebase is in seconds per tick, so we take the reciprocol */
-        info.animation.tps_numerator = avctx->time_base.den;
-        info.animation.tps_denominator = avctx->time_base.num;
-    }
-
-    if (JxlEncoderSetBasicInfo(ctx->encoder, &info) != JXL_ENC_SUCCESS) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to set JxlBasicInfo\n");
-        return AVERROR_EXTERNAL;
-    }
-
-    /* rendering intent doesn't matter here
-     * but libjxl will whine if we don't set it */
-    jxl_color.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
 
     switch (frame->color_trc && frame->color_trc != AVCOL_TRC_UNSPECIFIED
             ? frame->color_trc : avctx->color_trc) {
@@ -354,37 +286,196 @@ static int libjxl_preprocess_stream(AVCodecContext *avctx, const AVFrame *frame,
         break;
     default:
         if (pix_desc->flags & AV_PIX_FMT_FLAG_FLOAT) {
-            av_log(avctx, AV_LOG_WARNING, "Unknown transfer function, assuming Linear Light. Colors may be wrong.\n");
+            av_log(avctx, AV_LOG_WARNING,
+                    "Unknown transfer function, assuming Linear Light. Colors may be wrong.\n");
             jxl_color.transfer_function = JXL_TRANSFER_FUNCTION_LINEAR;
         } else {
-            av_log(avctx, AV_LOG_WARNING, "Unknown transfer function, assuming IEC61966-2-1/sRGB. Colors may be wrong.\n");
+            av_log(avctx, AV_LOG_WARNING,
+                    "Unknown transfer function, assuming IEC61966-2-1/sRGB. Colors may be wrong.\n");
             jxl_color.transfer_function = JXL_TRANSFER_FUNCTION_SRGB;
         }
     }
 
-    /* This should be implied to be honest
-     * but a libjxl bug makes it fail otherwise */
-    if (info.num_color_channels == 1)
+    jxl_color.rendering_intent = JXL_RENDERING_INTENT_RELATIVE;
+    if (info->num_color_channels == 1)
         jxl_color.color_space = JXL_COLOR_SPACE_GRAY;
     else
         jxl_color.color_space = JXL_COLOR_SPACE_RGB;
 
     ret = libjxl_populate_primaries(avctx, &jxl_color,
-            frame->color_primaries && frame->color_primaries != AVCOL_PRI_UNSPECIFIED
-            ? frame->color_primaries : avctx->color_primaries);
+        frame->color_primaries && frame->color_primaries != AVCOL_PRI_UNSPECIFIED
+        ? frame->color_primaries : avctx->color_primaries);
     if (ret < 0)
         return ret;
 
-    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_ICC_PROFILE);
-    if (sd && sd->size && JxlEncoderSetICCProfile(ctx->encoder, sd->data, sd->size) != JXL_ENC_SUCCESS)
-        av_log(avctx, AV_LOG_WARNING, "Could not set ICC Profile\n");
-    if (JxlEncoderSetColorEncoding(ctx->encoder, &jxl_color) != JXL_ENC_SUCCESS)
+    if (JxlEncoderSetColorEncoding(ctx->encoder, &jxl_color) != JXL_ENC_SUCCESS) {
         av_log(avctx, AV_LOG_WARNING, "Failed to set JxlColorEncoding\n");
+        return AVERROR_EXTERNAL;
+    }
+
+    return 0;
+}
+
+/**
+ * Sends metadata to libjxl based on the first frame of the stream, such as pixel format,
+ * orientation, bit depth, and that sort of thing.
+ */
+static int libjxl_preprocess_stream(AVCodecContext *avctx, const AVFrame *frame, int animated)
+{
+    LibJxlEncodeContext *ctx = avctx->priv_data;
+    AVFrameSideData *sd;
+    int32_t *matrix = (int32_t[9]){ 0 };
+    int ret = 0;
+    const AVPixFmtDescriptor *pix_desc = av_pix_fmt_desc_get(frame->format);
+    JxlBasicInfo info;
+    JxlPixelFormat *jxl_fmt = &ctx->jxl_fmt;
+    int bits_per_sample;
+    int orientation;
+    AVBufferRef *exif_buffer = NULL;
+#if JPEGXL_NUMERIC_VERSION >= JPEGXL_COMPUTE_NUMERIC_VERSION(0, 8, 0)
+    JxlBitDepth jxl_bit_depth;
+#endif
+
+    /* populate the basic info settings */
+    JxlEncoderInitBasicInfo(&info);
+    jxl_fmt->num_channels = pix_desc->nb_components;
+    info.xsize = frame->width;
+    info.ysize = frame->height;
+    info.num_extra_channels = (jxl_fmt->num_channels + 1) & 0x1;
+    info.num_color_channels = jxl_fmt->num_channels - info.num_extra_channels;
+    bits_per_sample = av_get_bits_per_pixel(pix_desc) / jxl_fmt->num_channels;
+    info.bits_per_sample = avctx->bits_per_raw_sample > 0 && !(pix_desc->flags & AV_PIX_FMT_FLAG_FLOAT)
+                           ? avctx->bits_per_raw_sample : bits_per_sample;
+    info.alpha_bits = (info.num_extra_channels > 0) * info.bits_per_sample;
+    if (pix_desc->flags & AV_PIX_FMT_FLAG_FLOAT) {
+        info.exponent_bits_per_sample = info.bits_per_sample > 16 ? 8 : 5;
+        info.alpha_exponent_bits = info.alpha_bits ? info.exponent_bits_per_sample : 0;
+        jxl_fmt->data_type = info.bits_per_sample > 16 ? JXL_TYPE_FLOAT : JXL_TYPE_FLOAT16;
+    } else {
+        info.exponent_bits_per_sample = 0;
+        info.alpha_exponent_bits = 0;
+        jxl_fmt->data_type = info.bits_per_sample <= 8 ? JXL_TYPE_UINT8 : JXL_TYPE_UINT16;
+    }
+
+    if (info.alpha_bits) {
+        if (avctx->alpha_mode == AVALPHA_MODE_PREMULTIPLIED ||
+            avctx->alpha_mode == AVALPHA_MODE_UNSPECIFIED && frame->alpha_mode == AVALPHA_MODE_PREMULTIPLIED) {
+            info.alpha_premultiplied = 1;
+        } else if (avctx->alpha_mode != AVALPHA_MODE_STRAIGHT && frame->alpha_mode != AVALPHA_MODE_STRAIGHT) {
+            av_log(avctx, AV_LOG_WARNING, "Unknown alpha mode, assuming straight (independent)\n");
+        }
+    }
+
+#if JPEGXL_NUMERIC_VERSION >= JPEGXL_COMPUTE_NUMERIC_VERSION(0, 8, 0)
+    jxl_bit_depth.bits_per_sample = bits_per_sample;
+    jxl_bit_depth.type = JXL_BIT_DEPTH_FROM_PIXEL_FORMAT;
+    jxl_bit_depth.exponent_bits_per_sample = pix_desc->flags & AV_PIX_FMT_FLAG_FLOAT ?
+                                             info.exponent_bits_per_sample : 0;
+#endif
+
+    /* JPEG XL format itself does not support limited range */
+    if (avctx->color_range == AVCOL_RANGE_MPEG ||
+        avctx->color_range == AVCOL_RANGE_UNSPECIFIED && frame->color_range == AVCOL_RANGE_MPEG)
+        av_log(avctx, AV_LOG_WARNING, "This encoder does not support limited (tv) range, colors will be wrong!\n");
+    else if (avctx->color_range != AVCOL_RANGE_JPEG && frame->color_range != AVCOL_RANGE_JPEG)
+        av_log(avctx, AV_LOG_WARNING, "Unknown color range, assuming full (pc)\n");
+
+    /* bitexact lossless requires there to be no XYB transform */
+    info.uses_original_profile = ctx->distance == 0.0 || !ctx->xyb;
+
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_EXIF);
+    if (sd) {
+        AVExifMetadata ifd = { 0 };
+        AVExifEntry *orient = NULL;
+        uint16_t tag = av_exif_get_tag_id("Orientation");
+        ret = av_exif_parse_buffer(avctx, sd->data, sd->size, &ifd, AV_EXIF_TIFF_HEADER);
+        if (ret >= 0)
+            ret = ff_exif_sanitize_ifd(avctx, frame, &ifd);
+        if (ret >= 0)
+            ret = av_exif_get_entry(avctx, &ifd, tag, 0, &orient);
+        if (ret >= 0 && orient && orient->value.uint[0] >= 1 && orient->value.uint[0] <= 8) {
+            av_exif_orientation_to_matrix(matrix, orient->value.uint[0]);
+            ret = av_exif_remove_entry(avctx, &ifd, tag, 0);
+        } else {
+            av_exif_orientation_to_matrix(matrix, 1);
+        }
+        if (ret >= 0)
+            ret = av_exif_write(avctx, &ifd, &exif_buffer, AV_EXIF_TIFF_HEADER);
+        if (ret < 0)
+            av_log(avctx, AV_LOG_WARNING, "unable to process EXIF frame data\n");
+        av_exif_free(&ifd);
+    } else {
+        sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX);
+        if (sd)
+            matrix = (int32_t *) sd->data;
+        else
+            av_exif_orientation_to_matrix(matrix, 1);
+    }
+
+    /* av_display_matrix_flip is a right-multipilcation */
+    /* i.e. flip is applied before the previous matrix */
+    if (frame->linesize < 0)
+        av_display_matrix_flip(matrix, 0, 1);
+
+    orientation = av_exif_matrix_to_orientation(matrix);
+    /* JPEG XL orientation flag agrees with EXIF for values 1-8 */
+    if (orientation) {
+        info.orientation = orientation;
+    } else {
+        av_log(avctx, AV_LOG_WARNING, "singular displaymatrix data\n");
+        info.orientation = frame->linesize[0] >= 0 ? JXL_ORIENT_IDENTITY : JXL_ORIENT_FLIP_VERTICAL;
+    }
+
+    /* restore the previous value */
+    if (frame->linesize < 0)
+        av_display_matrix_flip(matrix, 0, 1);
+
+    if (animated) {
+        info.have_animation = 1;
+        info.animation.have_timecodes = 0;
+        info.animation.num_loops = 0;
+        /* avctx->timebase is in seconds per tick, so we take the reciprocol */
+        info.animation.tps_numerator = avctx->time_base.den;
+        info.animation.tps_denominator = avctx->time_base.num;
+    }
+
+    if (JxlEncoderSetBasicInfo(ctx->encoder, &info) != JXL_ENC_SUCCESS) {
+        av_log(avctx, AV_LOG_ERROR, "Failed to set JxlBasicInfo\n");
+        ret = AVERROR_EXTERNAL;
+        goto end;
+    }
+
+    if (info.alpha_bits) {
+        JxlExtraChannelInfo extra_info;
+        JxlEncoderInitExtraChannelInfo(JXL_CHANNEL_ALPHA, &extra_info);
+        extra_info.bits_per_sample = info.alpha_bits;
+        extra_info.exponent_bits_per_sample = info.alpha_exponent_bits;
+        extra_info.alpha_premultiplied = info.alpha_premultiplied;
+
+        if (JxlEncoderSetExtraChannelInfo(ctx->encoder, 0, &extra_info) != JXL_ENC_SUCCESS) {
+            av_log(avctx, AV_LOG_ERROR, "Failed to set JxlExtraChannelInfo for alpha!\n");
+            return AVERROR_EXTERNAL;
+        }
+    }
+
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_ICC_PROFILE);
+    if (sd && sd->size && JxlEncoderSetICCProfile(ctx->encoder, sd->data, sd->size) != JXL_ENC_SUCCESS) {
+        av_log(avctx, AV_LOG_WARNING, "Could not set ICC Profile\n");
+        sd = NULL;
+    }
+
+    if (!sd || !sd->size)
+        libjxl_populate_colorspace(avctx, frame, pix_desc, &info);
 
 #if JPEGXL_NUMERIC_VERSION >= JPEGXL_COMPUTE_NUMERIC_VERSION(0, 8, 0)
     if (JxlEncoderSetFrameBitDepth(ctx->options, &jxl_bit_depth) != JXL_ENC_SUCCESS)
         av_log(avctx, AV_LOG_WARNING, "Failed to set JxlBitDepth\n");
 #endif
+
+    if (exif_buffer) {
+        if (JxlEncoderUseBoxes(ctx->encoder) != JXL_ENC_SUCCESS)
+            av_log(avctx, AV_LOG_WARNING, "Couldn't enable UseBoxes\n");
+    }
 
     /* depending on basic info, level 10 might
      * be required instead of level 5 */
@@ -393,7 +484,9 @@ static int libjxl_preprocess_stream(AVCodecContext *avctx, const AVFrame *frame,
             av_log(avctx, AV_LOG_WARNING, "Could not increase codestream level\n");
     }
 
-    return 0;
+end:
+    av_buffer_unref(&exif_buffer);
+    return ret;
 }
 
 /**
@@ -699,7 +792,10 @@ const FFCodec ff_libjxl_encoder = {
     .caps_internal    = FF_CODEC_CAP_NOT_INIT_THREADSAFE |
                         FF_CODEC_CAP_AUTO_THREADS | FF_CODEC_CAP_INIT_CLEANUP |
                         FF_CODEC_CAP_ICC_PROFILES,
-    .p.pix_fmts       = libjxl_supported_pixfmts,
+    CODEC_PIXFMTS_ARRAY(libjxl_supported_pixfmts),
+    .alpha_modes    = (const enum AVAlphaMode[]) {
+        AVALPHA_MODE_STRAIGHT, AVALPHA_MODE_PREMULTIPLIED, AVALPHA_MODE_UNSPECIFIED
+    },
     .p.priv_class     = &libjxl_encode_class,
     .p.wrapper_name   = "libjxl",
 };
@@ -719,7 +815,10 @@ const FFCodec ff_libjxl_anim_encoder = {
     .caps_internal    = FF_CODEC_CAP_NOT_INIT_THREADSAFE |
                         FF_CODEC_CAP_AUTO_THREADS | FF_CODEC_CAP_INIT_CLEANUP |
                         FF_CODEC_CAP_ICC_PROFILES,
-    .p.pix_fmts       = libjxl_supported_pixfmts,
+    CODEC_PIXFMTS_ARRAY(libjxl_supported_pixfmts),
+    .alpha_modes    = (const enum AVAlphaMode[]) {
+        AVALPHA_MODE_STRAIGHT, AVALPHA_MODE_PREMULTIPLIED, AVALPHA_MODE_UNSPECIFIED
+    },
     .p.priv_class     = &libjxl_encode_class,
     .p.wrapper_name   = "libjxl",
 };

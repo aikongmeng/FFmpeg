@@ -120,6 +120,7 @@ static struct{
 
     CFStringRef kVTProfileLevel_HEVC_Main_AutoLevel;
     CFStringRef kVTProfileLevel_HEVC_Main10_AutoLevel;
+    CFStringRef kVTProfileLevel_HEVC_Main42210_AutoLevel;
 
     CFStringRef kVTCompressionPropertyKey_RealTime;
     CFStringRef kVTCompressionPropertyKey_TargetQualityForAlpha;
@@ -192,6 +193,7 @@ static void loadVTEncSymbols(void){
 
     GET_SYM(kVTProfileLevel_HEVC_Main_AutoLevel,     "HEVC_Main_AutoLevel");
     GET_SYM(kVTProfileLevel_HEVC_Main10_AutoLevel,   "HEVC_Main10_AutoLevel");
+    GET_SYM(kVTProfileLevel_HEVC_Main42210_AutoLevel,   "HEVC_Main42210_AutoLevel");
 
     GET_SYM(kVTCompressionPropertyKey_RealTime, "RealTime");
     GET_SYM(kVTCompressionPropertyKey_TargetQualityForAlpha,
@@ -979,6 +981,11 @@ static bool get_vt_hevc_profile_level(AVCodecContext *avctx,
             *profile_level_val =
                 compat_keys.kVTProfileLevel_HEVC_Main10_AutoLevel;
             break;
+        case AV_PROFILE_HEVC_REXT:
+            // only main42210 is supported, omit depth and chroma subsampling
+            *profile_level_val =
+                compat_keys.kVTProfileLevel_HEVC_Main42210_AutoLevel;
+            break;
     }
 
     if (!*profile_level_val) {
@@ -1178,9 +1185,7 @@ static int vtenc_create_encoder(AVCodecContext   *avctx,
     VTEncContext *vtctx = avctx->priv_data;
     SInt32       bit_rate = avctx->bit_rate;
     SInt32       max_rate = avctx->rc_max_rate;
-    Float32      quality = avctx->global_quality / FF_QP2LAMBDA;
     CFNumberRef  bit_rate_num;
-    CFNumberRef  quality_num;
     CFNumberRef  bytes_per_second;
     CFNumberRef  one_second;
     CFArrayRef   data_rate_limits;
@@ -1212,7 +1217,7 @@ static int vtenc_create_encoder(AVCodecContext   *avctx,
     }
 
 #if defined (MAC_OS_X_VERSION_10_13) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_13)
-    if (__builtin_available(macOS 10.13, *)) {
+    if (__builtin_available(macOS 10.13, iOS 11.0, *)) {
         if (vtctx->supported_props) {
             CFRelease(vtctx->supported_props);
             vtctx->supported_props = NULL;
@@ -1240,11 +1245,13 @@ static int vtenc_create_encoder(AVCodecContext   *avctx,
         return AVERROR_EXTERNAL;
     }
 
-    if (avctx->flags & AV_CODEC_FLAG_QSCALE) {
-        quality = quality >= 100 ? 1.0 : quality / 100;
-        quality_num = CFNumberCreate(kCFAllocatorDefault,
-                                     kCFNumberFloat32Type,
-                                     &quality);
+    if (avctx->flags & AV_CODEC_FLAG_QSCALE || avctx->global_quality > 0) {
+        float factor = (avctx->flags & AV_CODEC_FLAG_QSCALE) ?
+                       FF_QP2LAMBDA * 100.0f : 100.0f;
+        Float32 quality = fminf(avctx->global_quality / factor, 1.0f);
+        CFNumberRef quality_num = CFNumberCreate(kCFAllocatorDefault,
+                                                 kCFNumberFloat32Type,
+                                                 &quality);
         if (!quality_num) return AVERROR(ENOMEM);
 
         status = VTSessionSetProperty(vtctx->session,
@@ -1335,8 +1342,10 @@ static int vtenc_create_encoder(AVCodecContext   *avctx,
         }
     }
 
-    if (vtctx->codec_id == AV_CODEC_ID_HEVC) {
-        if (avctx->pix_fmt == AV_PIX_FMT_BGRA && vtctx->alpha_quality > 0.0) {
+    if (vtctx->codec_id == AV_CODEC_ID_HEVC && vtctx->alpha_quality > 0.0) {
+        const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(avctx->pix_fmt);
+
+        if (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) {
             CFNumberRef alpha_quality_num = CFNumberCreate(kCFAllocatorDefault,
                                                            kCFNumberDoubleType,
                                                            &vtctx->alpha_quality);
@@ -1700,7 +1709,14 @@ static int vtenc_configure_encoder(AVCodecContext *avctx)
 #endif
 
     // low-latency mode: eliminate frame reordering, follow a one-in-one-out encoding mode
-    if ((avctx->flags & AV_CODEC_FLAG_LOW_DELAY) && avctx->codec_id == AV_CODEC_ID_H264) {
+    if ((avctx->flags & AV_CODEC_FLAG_LOW_DELAY) &&
+        ((avctx->codec_id == AV_CODEC_ID_H264) || (TARGET_CPU_ARM64 && avctx->codec_id == AV_CODEC_ID_HEVC))) {
+        if (!avctx->bit_rate) {
+            av_log(avctx, AV_LOG_ERROR, "Doesn't support automatic bitrate in low_delay mode, "
+                                        "please specify bitrate explicitly\n");
+            status = AVERROR(EINVAL);
+            goto init_cleanup;
+        }
         CFDictionarySetValue(enc_info,
                              compat_keys.kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
                              kCFBooleanTrue);
@@ -2853,7 +2869,9 @@ static const enum AVPixelFormat hevc_pix_fmts[] = {
     AV_PIX_FMT_NV12,
     AV_PIX_FMT_YUV420P,
     AV_PIX_FMT_BGRA,
+    AV_PIX_FMT_AYUV,
     AV_PIX_FMT_P010LE,
+    AV_PIX_FMT_P210,
     AV_PIX_FMT_NONE
 };
 
@@ -2974,7 +2992,7 @@ const FFCodec ff_h264_videotoolbox_encoder = {
     .p.id             = AV_CODEC_ID_H264,
     .p.capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY,
     .priv_data_size   = sizeof(VTEncContext),
-    .p.pix_fmts       = avc_pix_fmts,
+    CODEC_PIXFMTS_ARRAY(avc_pix_fmts),
     .defaults         = vt_defaults,
     .init             = vtenc_init,
     FF_CODEC_ENCODE_CB(vtenc_frame),
@@ -2988,6 +3006,8 @@ static const AVOption hevc_options[] = {
     { "profile", "Profile", OFFSET(profile), AV_OPT_TYPE_INT, { .i64 = AV_PROFILE_UNKNOWN }, AV_PROFILE_UNKNOWN, INT_MAX, VE, .unit = "profile" },
     { "main",     "Main Profile",     0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_HEVC_MAIN    }, INT_MIN, INT_MAX, VE, .unit = "profile" },
     { "main10",   "Main10 Profile",   0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_HEVC_MAIN_10 }, INT_MIN, INT_MAX, VE, .unit = "profile" },
+    { "main42210","Main 4:2:2 10 Profile",0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_HEVC_REXT }, INT_MIN, INT_MAX, VE, .unit = "profile" },
+    { "rext",     "Main 4:2:2 10 Profile",0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_HEVC_REXT }, INT_MIN, INT_MAX, VE, .unit = "profile" },
 
     { "alpha_quality", "Compression quality for the alpha channel", OFFSET(alpha_quality), AV_OPT_TYPE_DOUBLE, { .dbl = 0.0 }, 0.0, 1.0, VE },
 
@@ -3012,7 +3032,7 @@ const FFCodec ff_hevc_videotoolbox_encoder = {
     .p.capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY |
                         AV_CODEC_CAP_HARDWARE,
     .priv_data_size   = sizeof(VTEncContext),
-    .p.pix_fmts       = hevc_pix_fmts,
+    CODEC_PIXFMTS_ARRAY(hevc_pix_fmts),
     .defaults         = vt_defaults,
     .color_ranges     = AVCOL_RANGE_MPEG | AVCOL_RANGE_JPEG,
     .init             = vtenc_init,
@@ -3053,7 +3073,7 @@ const FFCodec ff_prores_videotoolbox_encoder = {
     .p.capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY |
                         AV_CODEC_CAP_HARDWARE,
     .priv_data_size   = sizeof(VTEncContext),
-    .p.pix_fmts       = prores_pix_fmts,
+    CODEC_PIXFMTS_ARRAY(prores_pix_fmts),
     .defaults         = vt_defaults,
     .color_ranges     = AVCOL_RANGE_MPEG | AVCOL_RANGE_JPEG,
     .init             = vtenc_init,

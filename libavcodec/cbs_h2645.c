@@ -1905,7 +1905,7 @@ static int cbs_h2645_assemble_fragment(CodedBitstreamContext *ctx,
     return 0;
 }
 
-static void cbs_h264_flush(CodedBitstreamContext *ctx)
+static av_cold void cbs_h264_flush(CodedBitstreamContext *ctx)
 {
     CodedBitstreamH264Context *h264 = ctx->priv_data;
 
@@ -1919,7 +1919,7 @@ static void cbs_h264_flush(CodedBitstreamContext *ctx)
     h264->last_slice_nal_unit_type = 0;
 }
 
-static void cbs_h264_close(CodedBitstreamContext *ctx)
+static av_cold void cbs_h264_close(CodedBitstreamContext *ctx)
 {
     CodedBitstreamH264Context *h264 = ctx->priv_data;
     int i;
@@ -1932,7 +1932,7 @@ static void cbs_h264_close(CodedBitstreamContext *ctx)
         av_refstruct_unref(&h264->pps[i]);
 }
 
-static void cbs_h265_flush(CodedBitstreamContext *ctx)
+static av_cold void cbs_h265_flush(CodedBitstreamContext *ctx)
 {
     CodedBitstreamH265Context *h265 = ctx->priv_data;
 
@@ -1948,7 +1948,7 @@ static void cbs_h265_flush(CodedBitstreamContext *ctx)
     h265->active_pps = NULL;
 }
 
-static void cbs_h265_close(CodedBitstreamContext *ctx)
+static av_cold void cbs_h265_close(CodedBitstreamContext *ctx)
 {
     CodedBitstreamH265Context *h265 = ctx->priv_data;
     int i;
@@ -1963,7 +1963,7 @@ static void cbs_h265_close(CodedBitstreamContext *ctx)
         av_refstruct_unref(&h265->pps[i]);
 }
 
-static void cbs_h266_flush(CodedBitstreamContext *ctx)
+static av_cold void cbs_h266_flush(CodedBitstreamContext *ctx)
 {
     CodedBitstreamH266Context *h266 = ctx->priv_data;
 
@@ -1976,7 +1976,7 @@ static void cbs_h266_flush(CodedBitstreamContext *ctx)
     av_refstruct_unref(&h266->ph_ref);
 }
 
-static void cbs_h266_close(CodedBitstreamContext *ctx)
+static av_cold void cbs_h266_close(CodedBitstreamContext *ctx)
 {
     CodedBitstreamH266Context *h266 = ctx->priv_data;
 
@@ -2310,6 +2310,28 @@ static const SEIMessageTypeDescriptor cbs_sei_h266_types[] = {
     SEI_MESSAGE_TYPE_END
 };
 
+static const SEIMessageTypeDescriptor cbs_sei_h274_types[] = {
+    {
+        SEI_TYPE_FILM_GRAIN_CHARACTERISTICS,
+        1, 0,
+        sizeof(SEIRawFilmGrainCharacteristics),
+        SEI_MESSAGE_RW(sei, film_grain_characteristics),
+    },
+    {
+        SEI_TYPE_DISPLAY_ORIENTATION,
+        1, 0,
+        sizeof(SEIRawDisplayOrientation),
+        SEI_MESSAGE_RW(sei, display_orientation)
+    },
+    {
+        SEI_TYPE_FRAME_FIELD_INFO,
+        1, 0,
+        sizeof(SEIRawFrameFieldInformation),
+        SEI_MESSAGE_RW(sei, frame_field_information)
+    },
+    SEI_MESSAGE_TYPE_END,
+};
+
 const SEIMessageTypeDescriptor *ff_cbs_sei_find_type(CodedBitstreamContext *ctx,
                                                      int payload_type)
 {
@@ -2333,6 +2355,13 @@ const SEIMessageTypeDescriptor *ff_cbs_sei_find_type(CodedBitstreamContext *ctx,
     for (i = 0; codec_list[i].type >= 0; i++) {
         if (codec_list[i].type == payload_type)
             return &codec_list[i];
+    }
+
+    if (ctx->codec->codec_id == AV_CODEC_ID_H266) {
+        for (i = 0; cbs_sei_h274_types[i].type >= 0; i++) {
+            if (cbs_sei_h274_types[i].type == payload_type)
+                return &cbs_sei_h274_types[i];
+        }
     }
 
     for (i = 0; cbs_sei_common_types[i].type >= 0; i++) {

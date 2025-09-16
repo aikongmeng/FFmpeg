@@ -191,25 +191,45 @@ static int CUDAAPI cuvid_handle_video_sequence(void *opaque, CUVIDEOFORMAT* form
         break;
     case 2: // 10-bit
         if (chroma_444) {
+#if FF_API_NVDEC_OLD_PIX_FMTS
             pix_fmts[1] = AV_PIX_FMT_YUV444P16;
+#else
+            pix_fmts[1] = AV_PIX_FMT_YUV444P10MSB;
+#endif
 #ifdef NVDEC_HAVE_422_SUPPORT
         } else if (format->chroma_format == cudaVideoChromaFormat_422) {
-            pix_fmts[1] = AV_PIX_FMT_P216LE;
+#if FF_API_NVDEC_OLD_PIX_FMTS
+            pix_fmts[1] = AV_PIX_FMT_P216;
+#else
+            pix_fmts[1] = AV_PIX_FMT_P210;
+#endif
 #endif
         } else {
-            pix_fmts[1] = AV_PIX_FMT_P016;
+            pix_fmts[1] = AV_PIX_FMT_P010;
         }
         caps = &ctx->caps10;
         break;
     case 4: // 12-bit
         if (chroma_444) {
+#if FF_API_NVDEC_OLD_PIX_FMTS
             pix_fmts[1] = AV_PIX_FMT_YUV444P16;
+#else
+            pix_fmts[1] = AV_PIX_FMT_YUV444P12MSB;
+#endif
 #ifdef NVDEC_HAVE_422_SUPPORT
         } else if (format->chroma_format == cudaVideoChromaFormat_422) {
-            pix_fmts[1] = AV_PIX_FMT_P216LE;
+#if FF_API_NVDEC_OLD_PIX_FMTS
+            pix_fmts[1] = AV_PIX_FMT_P216;
+#else
+            pix_fmts[1] = AV_PIX_FMT_P212;
+#endif
 #endif
         } else {
+#if FF_API_NVDEC_OLD_PIX_FMTS
             pix_fmts[1] = AV_PIX_FMT_P016;
+#else
+            pix_fmts[1] = AV_PIX_FMT_P012;
+#endif
         }
         caps = &ctx->caps12;
         break;
@@ -424,6 +444,7 @@ static int CUDAAPI cuvid_handle_picture_display(void *opaque, CUVIDPARSERDISPINF
     AVCodecContext *avctx = opaque;
     CuvidContext *ctx = avctx->priv_data;
     CuvidParsedFrame parsed_frame = { { 0 } };
+    int ret;
 
     parsed_frame.dispinfo = *dispinfo;
     ctx->internal_error = 0;
@@ -432,13 +453,20 @@ static int CUDAAPI cuvid_handle_picture_display(void *opaque, CUVIDPARSERDISPINF
     parsed_frame.dispinfo.progressive_frame = ctx->progressive_sequence;
 
     if (ctx->deint_mode_current == cudaVideoDeinterlaceMode_Weave) {
-        av_fifo_write(ctx->frame_queue, &parsed_frame, 1);
+        ret = av_fifo_write(ctx->frame_queue, &parsed_frame, 1);
+        if (ret < 0)
+            av_log(avctx, AV_LOG_ERROR, "Writing frame to fifo failed!\n");
     } else {
         parsed_frame.is_deinterlacing = 1;
-        av_fifo_write(ctx->frame_queue, &parsed_frame, 1);
+        ret = av_fifo_write(ctx->frame_queue, &parsed_frame, 1);
+        if (ret < 0)
+            av_log(avctx, AV_LOG_ERROR, "Writing first frame to fifo failed!\n");
+
         if (!ctx->drop_second_field) {
             parsed_frame.second_field = 1;
-            av_fifo_write(ctx->frame_queue, &parsed_frame, 1);
+            ret = av_fifo_write(ctx->frame_queue, &parsed_frame, 1);
+            if (ret < 0)
+                av_log(avctx, AV_LOG_ERROR, "Writing second frame to fifo failed!\n");
         }
     }
 
@@ -497,7 +525,12 @@ static int cuvid_decode_packet(AVCodecContext *avctx, const AVPacket *avpkt)
         ctx->decoder_flushing = 1;
     }
 
-    ret = CHECK_CU(ctx->cvdl->cuvidParseVideoData(ctx->cuparser, &cupkt));
+    // When flushing, only actually flush cuvid when the output buffer has been fully emptied.
+    // CUVID happily dumps out a ton of frames with no regard for its own available surfaces.
+    if (!ctx->decoder_flushing || (ctx->decoder_flushing && !av_fifo_can_read(ctx->frame_queue)))
+        ret = CHECK_CU(ctx->cvdl->cuvidParseVideoData(ctx->cuparser, &cupkt));
+    else
+        ret = 0;
 
     if (ret < 0)
         goto error;
@@ -697,12 +730,6 @@ static int cuvid_output_frame(AVCodecContext *avctx, AVFrame *frame)
          * So set pkt_pts and clear all the other pkt_ fields.
          */
         frame->duration = 0;
-#if FF_API_FRAME_PKT
-FF_DISABLE_DEPRECATION_WARNINGS
-        frame->pkt_pos = -1;
-        frame->pkt_size = -1;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
 
         if (!parsed_frame.is_deinterlacing && !parsed_frame.dispinfo.progressive_frame)
             frame->flags |= AV_FRAME_FLAG_INTERLACED;
@@ -768,11 +795,10 @@ static int cuvid_test_capabilities(AVCodecContext *avctx,
                                    const CUVIDPARSERPARAMS *cuparseinfo,
                                    int probed_width,
                                    int probed_height,
-                                   int bit_depth)
+                                   int bit_depth, int is_yuv422, int is_yuv444)
 {
     CuvidContext *ctx = avctx->priv_data;
     CUVIDDECODECAPS *caps;
-    cudaVideoChromaFormat chroma_format;
     int res8 = 0, res10 = 0, res12 = 0;
 
     if (!ctx->cvdl->cuvidGetDecoderCaps) {
@@ -792,28 +818,14 @@ static int cuvid_test_capabilities(AVCodecContext *avctx,
 
     ctx->caps8.eCodecType = ctx->caps10.eCodecType = ctx->caps12.eCodecType
         = cuparseinfo->CodecType;
-    switch (avctx->pix_fmt) {
-        case AV_PIX_FMT_YUV444P16:
-        case AV_PIX_FMT_YUV444P:
-            chroma_format = cudaVideoChromaFormat_444;
-            break;
-#ifdef NVDEC_HAVE_422_SUPPORT
-        case AV_PIX_FMT_P216:
-        case AV_PIX_FMT_P210:
-        case AV_PIX_FMT_NV16:
-            chroma_format = cudaVideoChromaFormat_422;
-            break;
-#endif
-        case AV_PIX_FMT_P016:
-        case AV_PIX_FMT_P010:
-        case AV_PIX_FMT_NV12:
-            chroma_format = cudaVideoChromaFormat_420;
-            break;
-        default:
-            chroma_format = cudaVideoChromaFormat_Monochrome;
-    }
+
     ctx->caps8.eChromaFormat = ctx->caps10.eChromaFormat = ctx->caps12.eChromaFormat
-        = chroma_format;
+        = is_yuv444 ? cudaVideoChromaFormat_444 :
+#ifdef NVDEC_HAVE_422_SUPPORT
+          (is_yuv422 ? cudaVideoChromaFormat_422 : cudaVideoChromaFormat_420);
+#else
+          cudaVideoChromaFormat_420;
+#endif
 
     ctx->caps8.nBitDepthMinus8 = 0;
     ctx->caps10.nBitDepthMinus8 = 2;
@@ -915,10 +927,18 @@ static av_cold int cuvid_decode_init(AVCodecContext *avctx)
     // Pick pixel format based on bit depth and chroma sampling.
     switch (probed_bit_depth) {
     case 10:
+#if FF_API_NVDEC_OLD_PIX_FMTS
         pix_fmts[1] = is_yuv444 ? AV_PIX_FMT_YUV444P16 : (is_yuv422 ? AV_PIX_FMT_P216 : AV_PIX_FMT_P010);
+#else
+        pix_fmts[1] = is_yuv444 ? AV_PIX_FMT_YUV444P10MSB : (is_yuv422 ? AV_PIX_FMT_P210 : AV_PIX_FMT_P010);
+#endif
         break;
     case 12:
+#if FF_API_NVDEC_OLD_PIX_FMTS
         pix_fmts[1] = is_yuv444 ? AV_PIX_FMT_YUV444P16 : (is_yuv422 ? AV_PIX_FMT_P216 : AV_PIX_FMT_P016);
+#else
+        pix_fmts[1] = is_yuv444 ? AV_PIX_FMT_YUV444P12MSB : (is_yuv422 ? AV_PIX_FMT_P212 : AV_PIX_FMT_P012);
+#endif
         break;
     default:
         pix_fmts[1] = is_yuv444 ? AV_PIX_FMT_YUV444P : (is_yuv422 ? AV_PIX_FMT_NV16 : AV_PIX_FMT_NV12);
@@ -1122,7 +1142,7 @@ static av_cold int cuvid_decode_init(AVCodecContext *avctx)
     ret = cuvid_test_capabilities(avctx, &ctx->cuparseinfo,
                                   probed_width,
                                   probed_height,
-                                  probed_bit_depth);
+                                  probed_bit_depth, is_yuv422, is_yuv444);
     if (ret < 0)
         goto error;
 

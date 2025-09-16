@@ -191,6 +191,13 @@ static int alloc_picture(H264Context *h, H264Picture *pic)
 
     av_assert0(!pic->f->data[0]);
 
+    if (h->sei.common.lcevc.info) {
+        HEVCSEILCEVC *lcevc = &h->sei.common.lcevc;
+        ret = ff_frame_new_side_data_from_buf(h->avctx, pic->f, AV_FRAME_DATA_LCEVC, &lcevc->info);
+        if (ret < 0)
+            return ret;
+    }
+
     pic->tf.f = pic->f;
     ret = ff_thread_get_ext_buffer(h->avctx, &pic->tf,
                                    pic->reference ? AV_GET_BUFFER_FLAG_REF : 0);
@@ -2100,7 +2107,7 @@ int ff_h264_queue_decode_slice(H264Context *h, const H2645NAL *nal)
                 if (ret < 0)
                     return ret;
             } else if (h->cur_pic_ptr && !FIELD_PICTURE(h) && !h->first_field && h->nal_unit_type  == H264_NAL_IDR_SLICE) {
-                av_log(h, AV_LOG_WARNING, "Broken frame packetizing\n");
+                av_log(h->avctx, AV_LOG_WARNING, "Broken frame packetizing\n");
                 ret = ff_h264_field_end(h, h->slice_ctx, 1);
                 ff_thread_report_progress(&h->cur_pic_ptr->tf, INT_MAX, 0);
                 ff_thread_report_progress(&h->cur_pic_ptr->tf, INT_MAX, 1);

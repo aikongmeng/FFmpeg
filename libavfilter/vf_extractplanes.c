@@ -213,6 +213,10 @@ static int query_formats(AVFilterContext *ctx)
     else
         out_pixfmts = out32le_pixfmts;
 
+    /* Splitting planes apart only makes sense for straight alpha */
+    if ((ret = ff_formats_ref(ff_make_formats_list_singleton(AVALPHA_MODE_STRAIGHT), &ctx->inputs[0]->outcfg.alpha_modes)) < 0)
+        return ret;
+
     for (i = 0; i < ctx->nb_outputs; i++)
         if ((ret = ff_formats_ref(ff_make_format_list(out_pixfmts), &ctx->outputs[i]->incfg.formats)) < 0)
             return ret;
@@ -367,15 +371,7 @@ static int activate(AVFilterContext *ctx)
         return 0;
     }
 
-    for (int i = 0; i < ctx->nb_outputs; i++) {
-        if (ff_outlink_get_status(ctx->outputs[i]))
-            continue;
-
-        if (ff_outlink_frame_wanted(ctx->outputs[i])) {
-            ff_inlink_request_frame(inlink);
-            return 0;
-        }
-    }
+    FF_FILTER_FORWARD_WANTED_ANY(ctx, inlink);
 
     return FFERROR_NOT_READY;
 }

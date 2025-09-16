@@ -917,6 +917,7 @@ ost_bind_filter(const Muxer *mux, MuxStream *ms, OutputFilter *ofilter,
         .height           = enc_ctx->height,
         .color_space      = enc_ctx->colorspace,
         .color_range      = enc_ctx->color_range,
+        .alpha_mode       = enc_ctx->alpha_mode,
         .vsync_method     = vsync_method,
         .frame_rate       = ms->frame_rate,
         .max_frame_rate   = ms->max_frame_rate,
@@ -962,6 +963,11 @@ ost_bind_filter(const Muxer *mux, MuxStream *ms, OutputFilter *ofilter,
         ret = avcodec_get_supported_config(enc_ctx, NULL,
                                            AV_CODEC_CONFIG_COLOR_RANGE, 0,
                                            (const void **) &opts.color_ranges, NULL);
+        if (ret < 0)
+            return ret;
+        ret = avcodec_get_supported_config(enc_ctx, NULL,
+                                           AV_CODEC_CONFIG_ALPHA_MODE, 0,
+                                           (const void **) &opts.alpha_modes, NULL);
         if (ret < 0)
             return ret;
     } else {
@@ -1593,7 +1599,7 @@ static int map_auto_video(Muxer *mux, const OptionsContext *o)
 {
     AVFormatContext *oc = mux->fc;
     InputStream *best_ist = NULL;
-    int best_score = 0;
+    int64_t best_score = 0;
     int qcr;
 
     /* video: highest resolution */
@@ -1604,16 +1610,16 @@ static int map_auto_video(Muxer *mux, const OptionsContext *o)
     for (int j = 0; j < nb_input_files; j++) {
         InputFile *ifile = input_files[j];
         InputStream *file_best_ist = NULL;
-        int file_best_score = 0;
+        int64_t file_best_score = 0;
         for (int i = 0; i < ifile->nb_streams; i++) {
             InputStream *ist = ifile->streams[i];
-            int score;
+            int64_t score;
 
             if (ist->user_set_discard == AVDISCARD_ALL ||
                 ist->st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO)
                 continue;
 
-            score = ist->st->codecpar->width * ist->st->codecpar->height
+            score = ist->st->codecpar->width * (int64_t)ist->st->codecpar->height
                        + 100000000 * !!(ist->st->event_flags & AVSTREAM_EVENT_FLAG_NEW_PACKETS)
                        + 5000000*!!(ist->st->disposition & AV_DISPOSITION_DEFAULT);
             if((qcr!=MKTAG('A', 'P', 'I', 'C')) && (ist->st->disposition & AV_DISPOSITION_ATTACHED_PIC))

@@ -41,6 +41,7 @@
 #include "vp9data.h"
 #include "vp9dec.h"
 #include "vpx_rac.h"
+#include "libavutil/attributes.h"
 #include "libavutil/avassert.h"
 #include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
@@ -97,6 +98,7 @@ static void vp9_tile_data_free(VP9TileData *td)
 static void vp9_frame_unref(VP9Frame *f)
 {
     ff_progress_frame_unref(&f->tf);
+    av_refstruct_unref(&f->header_ref);
     av_refstruct_unref(&f->extradata);
     av_refstruct_unref(&f->hwaccel_picture_private);
     f->segmentation_map = NULL;
@@ -145,6 +147,9 @@ fail:
 
 static void vp9_frame_replace(VP9Frame *dst, const VP9Frame *src)
 {
+    av_refstruct_replace(&dst->header_ref, src->header_ref);
+    dst->frame_header = src->frame_header;
+
     ff_progress_frame_replace(&dst->tf, &src->tf);
 
     av_refstruct_replace(&dst->extradata, src->extradata);
@@ -165,7 +170,8 @@ static int update_size(AVCodecContext *avctx, int w, int h)
                      CONFIG_VP9_NVDEC_HWACCEL + \
                      CONFIG_VP9_VAAPI_HWACCEL + \
                      CONFIG_VP9_VDPAU_HWACCEL + \
-                     CONFIG_VP9_VIDEOTOOLBOX_HWACCEL)
+                     CONFIG_VP9_VIDEOTOOLBOX_HWACCEL + \
+                     CONFIG_VP9_VULKAN_HWACCEL)
     enum AVPixelFormat pix_fmts[HWACCEL_MAX + 2], *fmtp = pix_fmts;
     VP9Context *s = avctx->priv_data;
     uint8_t *p;
@@ -203,6 +209,9 @@ static int update_size(AVCodecContext *avctx, int w, int h)
 #if CONFIG_VP9_VIDEOTOOLBOX_HWACCEL
             *fmtp++ = AV_PIX_FMT_VIDEOTOOLBOX;
 #endif
+#if CONFIG_VP9_VULKAN_HWACCEL
+            *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
             break;
         case AV_PIX_FMT_YUV420P12:
 #if CONFIG_VP9_NVDEC_HWACCEL
@@ -214,6 +223,9 @@ static int update_size(AVCodecContext *avctx, int w, int h)
 #if CONFIG_VP9_VDPAU_HWACCEL
             *fmtp++ = AV_PIX_FMT_VDPAU;
 #endif
+#if CONFIG_VP9_VULKAN_HWACCEL
+            *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
             break;
         case AV_PIX_FMT_YUV444P:
         case AV_PIX_FMT_YUV444P10:
@@ -221,12 +233,18 @@ static int update_size(AVCodecContext *avctx, int w, int h)
 #if CONFIG_VP9_VAAPI_HWACCEL
             *fmtp++ = AV_PIX_FMT_VAAPI;
 #endif
+#if CONFIG_VP9_VULKAN_HWACCEL
+            *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
             break;
         case AV_PIX_FMT_GBRP:
         case AV_PIX_FMT_GBRP10:
         case AV_PIX_FMT_GBRP12:
 #if CONFIG_VP9_VAAPI_HWACCEL
             *fmtp++ = AV_PIX_FMT_VAAPI;
+#endif
+#if CONFIG_VP9_VULKAN_HWACCEL
+            *fmtp++ = AV_PIX_FMT_VULKAN;
 #endif
             break;
         }
@@ -1140,7 +1158,8 @@ static void decode_sb(VP9TileData *td, int row, int col, VP9Filter *lflvl,
                           uvoff + (8 * hbs * bytesperpixel >> s->ss_h), bl + 1);
                 break;
             default:
-                av_assert0(0);
+                av_unreachable("ff_vp9_partition_tree only has "
+                               "the four PARTITION_* terminal codes");
             }
         } else if (vpx_rac_get_prob_branchy(td->c, p[1])) {
             bp = PARTITION_SPLIT;
@@ -1247,6 +1266,7 @@ static av_cold int vp9_decode_free(AVCodecContext *avctx)
     for (i = 0; i < 8; i++) {
         ff_progress_frame_unref(&s->s.refs[i]);
         ff_progress_frame_unref(&s->next_refs[i]);
+        vp9_frame_unref(&s->s.ref_frames[i]);
     }
 
     free_buffers(s);
@@ -1254,6 +1274,11 @@ static av_cold int vp9_decode_free(AVCodecContext *avctx)
     av_freep(&s->entries);
     ff_pthread_free(s, vp9_context_offsets);
 #endif
+
+    av_refstruct_unref(&s->header_ref);
+    ff_cbs_fragment_free(&s->current_frag);
+    ff_cbs_close(&s->cbc);
+
     av_freep(&s->td);
     return 0;
 }
@@ -1556,10 +1581,26 @@ static int vp9_decode_frame(AVCodecContext *avctx, AVFrame *frame,
     int size = pkt->size;
     VP9Context *s = avctx->priv_data;
     int ret, i, j, ref;
+    CodedBitstreamUnit *unit;
+    VP9RawFrame *rf;
+
     int retain_segmap_ref = s->s.frames[REF_FRAME_SEGMAP].segmentation_map &&
                             (!s->s.h.segmentation.enabled || !s->s.h.segmentation.update_map);
     const VP9Frame *src;
     AVFrame *f;
+
+    ret = ff_cbs_read_packet(s->cbc, &s->current_frag, pkt);
+    if (ret < 0) {
+        ff_cbs_fragment_reset(&s->current_frag);
+        av_log(avctx, AV_LOG_ERROR, "Failed to read frame header.\n");
+        return ret;
+    }
+
+    unit = &s->current_frag.units[0];
+    rf = unit->content;
+
+    av_refstruct_replace(&s->header_ref, unit->content_ref);
+    s->frame_header = &rf->header;
 
     if ((ret = decode_frame_header(avctx, data, size, &ref)) < 0) {
         return ret;
@@ -1572,6 +1613,7 @@ static int vp9_decode_frame(AVCodecContext *avctx, AVFrame *frame,
             ff_progress_frame_replace(&s->next_refs[i], &s->s.refs[i]);
         ff_thread_finish_setup(avctx);
         ff_progress_frame_await(&s->s.refs[ref], INT_MAX);
+        ff_cbs_fragment_reset(&s->current_frag);
 
         if ((ret = av_frame_ref(frame, s->s.refs[ref].f)) < 0)
             return ret;
@@ -1591,6 +1633,10 @@ static int vp9_decode_frame(AVCodecContext *avctx, AVFrame *frame,
     vp9_frame_unref(&s->s.frames[CUR_FRAME]);
     if ((ret = vp9_frame_alloc(avctx, &s->s.frames[CUR_FRAME])) < 0)
         return ret;
+
+    s->s.frames[CUR_FRAME].header_ref = av_refstruct_ref(s->header_ref);
+    s->s.frames[CUR_FRAME].frame_header = s->frame_header;
+
     f = s->s.frames[CUR_FRAME].tf.f;
     if (s->s.h.keyframe)
         f->flags |= AV_FRAME_FLAG_KEY;
@@ -1618,7 +1664,7 @@ static int vp9_decode_frame(AVCodecContext *avctx, AVFrame *frame,
 
     if (avctx->hwaccel) {
         const FFHWAccel *hwaccel = ffhwaccel(avctx->hwaccel);
-        ret = hwaccel->start_frame(avctx, NULL, 0);
+        ret = hwaccel->start_frame(avctx, pkt->buf, pkt->data, pkt->size);
         if (ret < 0)
             return ret;
         ret = hwaccel->decode_slice(avctx, pkt->data, pkt->size);
@@ -1627,6 +1673,13 @@ static int vp9_decode_frame(AVCodecContext *avctx, AVFrame *frame,
         ret = hwaccel->end_frame(avctx);
         if (ret < 0)
             return ret;
+
+        for (i = 0; i < 8; i++) {
+            vp9_frame_replace(&s->s.ref_frames[i],
+                              s->s.h.refreshrefmask & (1 << i) ?
+                                  &s->s.frames[CUR_FRAME] : &s->s.ref_frames[i]);
+        }
+
         goto finish;
     }
 
@@ -1751,6 +1804,8 @@ static int vp9_decode_frame(AVCodecContext *avctx, AVFrame *frame,
     }
 
 finish:
+    ff_cbs_fragment_reset(&s->current_frag);
+
     ff_progress_frame_report(&s->s.frames[CUR_FRAME].tf, INT_MAX);
     // ref frame setup
     for (int i = 0; i < 8; i++)
@@ -1768,15 +1823,21 @@ fail:
     return ret;
 }
 
-static void vp9_decode_flush(AVCodecContext *avctx)
+static av_cold void vp9_decode_flush(AVCodecContext *avctx)
 {
     VP9Context *s = avctx->priv_data;
     int i;
 
     for (i = 0; i < 3; i++)
         vp9_frame_unref(&s->s.frames[i]);
-    for (i = 0; i < 8; i++)
+
+    for (i = 0; i < 8; i++) {
         ff_progress_frame_unref(&s->s.refs[i]);
+        vp9_frame_unref(&s->s.ref_frames[i]);
+    }
+
+    ff_cbs_fragment_reset(&s->current_frag);
+    ff_cbs_flush(s->cbc);
 
     if (FF_HW_HAS_CB(avctx, flush))
         FF_HW_SIMPLE_CALL(avctx, flush);
@@ -1789,6 +1850,10 @@ static av_cold int vp9_decode_init(AVCodecContext *avctx)
 
     s->last_bpp = 0;
     s->s.h.filter.sharpness = -1;
+
+    ret = ff_cbs_init(&s->cbc, AV_CODEC_ID_VP9, avctx);
+    if (ret < 0)
+        return ret;
 
 #if HAVE_THREADS
     if (avctx->active_thread_type & FF_THREAD_SLICE) {
@@ -1812,6 +1877,13 @@ static int vp9_decode_update_thread_context(AVCodecContext *dst, const AVCodecCo
         ff_progress_frame_replace(&s->s.refs[i], &ssrc->next_refs[i]);
     av_refstruct_replace(&s->frame_extradata_pool, ssrc->frame_extradata_pool);
     s->frame_extradata_pool_size = ssrc->frame_extradata_pool_size;
+
+    av_refstruct_replace(&s->header_ref, ssrc->header_ref);
+    for (int i = 0; i < 8; i++)
+        vp9_frame_replace(&s->s.ref_frames[i], &ssrc->s.ref_frames[i]);
+
+    s->frame_header = ssrc->frame_header;
+    memcpy(s->cbc->priv_data, ssrc->cbc->priv_data, sizeof(CodedBitstreamVP9Context));
 
     s->s.h.invisible = ssrc->s.h.invisible;
     s->s.h.keyframe = ssrc->s.h.keyframe;
@@ -1878,6 +1950,9 @@ const FFCodec ff_vp9_decoder = {
 #endif
 #if CONFIG_VP9_VIDEOTOOLBOX_HWACCEL
                                HWACCEL_VIDEOTOOLBOX(vp9),
+#endif
+#if CONFIG_VP9_VULKAN_HWACCEL
+                               HWACCEL_VULKAN(vp9),
 #endif
                                NULL
                            },

@@ -733,13 +733,12 @@ static int packet_decode(DecoderPriv *dp, AVPacket *pkt, AVFrame *frame)
         av_log(dp, AV_LOG_ERROR, "Error submitting %s to decoder: %s\n",
                pkt ? "packet" : "EOF", av_err2str(ret));
 
-        if (ret != AVERROR_EOF) {
-            dp->dec.decode_errors++;
-            if (!exit_on_error)
-                ret = 0;
-        }
+        if (ret == AVERROR_EOF)
+            return ret;
 
-        return ret;
+        dp->dec.decode_errors++;
+        if (exit_on_error)
+            return ret;
     }
 
     while (1) {
@@ -787,15 +786,6 @@ static int packet_decode(DecoderPriv *dp, AVPacket *pkt, AVFrame *frame)
         fd->wallclock[LATENCY_PROBE_DEC_POST] = av_gettime_relative();
 
         frame->time_base = dec->pkt_timebase;
-
-        for (int i = 0; i < dec->nb_decoded_side_data; i++) {
-            const AVFrameSideData *src = dec->decoded_side_data[i];
-            if (av_frame_side_data_get(frame->side_data, frame->nb_side_data, src->type))
-                continue;
-            ret = av_frame_side_data_clone(&frame->side_data, &frame->nb_side_data, src, 0);
-            if (ret < 0)
-                return ret;
-        }
 
         if (dec->codec_type == AVMEDIA_TYPE_AUDIO) {
             dp->dec.samples_decoded += frame->nb_samples;
@@ -1604,7 +1594,7 @@ static int dec_open(DecoderPriv *dp, AVDictionary **dec_opts,
     if (o->flags & DECODER_FLAG_BITEXACT)
         dp->dec_ctx->flags |= AV_CODEC_FLAG_BITEXACT;
 
-    // we apply cropping outselves
+    // we apply cropping ourselves
     dp->apply_cropping          = dp->dec_ctx->apply_cropping;
     dp->dec_ctx->apply_cropping = 0;
 
@@ -1645,6 +1635,7 @@ static int dec_open(DecoderPriv *dp, AVDictionary **dec_opts,
             param_out->sample_aspect_ratio  = dp->dec_ctx->sample_aspect_ratio;
             param_out->colorspace           = dp->dec_ctx->colorspace;
             param_out->color_range          = dp->dec_ctx->color_range;
+            param_out->alpha_mode           = dp->dec_ctx->alpha_mode;
         }
 
         av_frame_side_data_free(&param_out->side_data, &param_out->nb_side_data);

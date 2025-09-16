@@ -57,9 +57,6 @@ static const char *const var_names[] = {
     "ovsub",
     "n",
     "t",
-#if FF_API_FRAME_PKT
-    "pos",
-#endif
     "ref_w", "rw",
     "ref_h", "rh",
     "ref_a",
@@ -98,9 +95,6 @@ enum var_name {
     VAR_OVSUB,
     VAR_N,
     VAR_T,
-#if FF_API_FRAME_PKT
-    VAR_POS,
-#endif
     VAR_REF_W, VAR_RW,
     VAR_REF_H, VAR_RH,
     VAR_REF_A,
@@ -247,28 +241,9 @@ static int check_exprs(AVFilterContext *ctx)
         return AVERROR(EINVAL);
     }
 
-    if (!IS_SCALE2REF(ctx) &&
-        (vars_w[VAR_S2R_MAIN_W]    || vars_h[VAR_S2R_MAIN_W]    ||
-         vars_w[VAR_S2R_MAIN_H]    || vars_h[VAR_S2R_MAIN_H]    ||
-         vars_w[VAR_S2R_MAIN_A]    || vars_h[VAR_S2R_MAIN_A]    ||
-         vars_w[VAR_S2R_MAIN_SAR]  || vars_h[VAR_S2R_MAIN_SAR]  ||
-         vars_w[VAR_S2R_MAIN_DAR]  || vars_h[VAR_S2R_MAIN_DAR]  ||
-         vars_w[VAR_S2R_MDAR]      || vars_h[VAR_S2R_MDAR]      ||
-         vars_w[VAR_S2R_MAIN_HSUB] || vars_h[VAR_S2R_MAIN_HSUB] ||
-         vars_w[VAR_S2R_MAIN_VSUB] || vars_h[VAR_S2R_MAIN_VSUB] ||
-         vars_w[VAR_S2R_MAIN_N]    || vars_h[VAR_S2R_MAIN_N]    ||
-         vars_w[VAR_S2R_MAIN_T]    || vars_h[VAR_S2R_MAIN_T]    ||
-         vars_w[VAR_S2R_MAIN_POS]  || vars_h[VAR_S2R_MAIN_POS]) ) {
-        av_log(ctx, AV_LOG_ERROR, "Expressions with scale2ref variables are not valid in scale filter.\n");
-        return AVERROR(EINVAL);
-    }
-
     if (scale->eval_mode == EVAL_MODE_INIT &&
         (vars_w[VAR_N]            || vars_h[VAR_N]           ||
          vars_w[VAR_T]            || vars_h[VAR_T]           ||
-#if FF_API_FRAME_PKT
-         vars_w[VAR_POS]          || vars_h[VAR_POS]         ||
-#endif
          vars_w[VAR_S2R_MAIN_N]   || vars_h[VAR_S2R_MAIN_N]  ||
          vars_w[VAR_S2R_MAIN_T]   || vars_h[VAR_S2R_MAIN_T]  ||
          vars_w[VAR_S2R_MAIN_POS] || vars_h[VAR_S2R_MAIN_POS]) ) {
@@ -545,6 +520,12 @@ static int query_formats(const AVFilterContext *ctx,
     if ((ret = ff_formats_ref(formats, &cfg_out[0]->color_ranges)) < 0)
         return ret;
 
+    if (scale->sws->alpha_blend) {
+        if ((ret = ff_formats_ref(ff_make_formats_list_singleton(AVALPHA_MODE_STRAIGHT),
+                                  &cfg_in[0]->alpha_modes)) < 0)
+            return ret;
+    }
+
     return 0;
 }
 
@@ -790,16 +771,8 @@ static int scale_frame(AVFilterLink *link, AVFrame **frame_in,
         if (scale->eval_mode == EVAL_MODE_FRAME &&
             !frame_changed &&
             !IS_SCALE2REF(ctx) &&
-            !(vars_w[VAR_N] || vars_w[VAR_T]
-#if FF_API_FRAME_PKT
-              || vars_w[VAR_POS]
-#endif
-              ) &&
-            !(vars_h[VAR_N] || vars_h[VAR_T]
-#if FF_API_FRAME_PKT
-              || vars_h[VAR_POS]
-#endif
-              ) &&
+            !(vars_w[VAR_N] || vars_w[VAR_T]) &&
+            !(vars_h[VAR_N] || vars_h[VAR_T]) &&
             scale->w && scale->h)
             goto scale;
 
@@ -821,19 +794,9 @@ static int scale_frame(AVFilterLink *link, AVFrame **frame_in,
         if (IS_SCALE2REF(ctx)) {
             scale->var_values[VAR_S2R_MAIN_N] = inl->frame_count_out;
             scale->var_values[VAR_S2R_MAIN_T] = TS2T(in->pts, link->time_base);
-#if FF_API_FRAME_PKT
-FF_DISABLE_DEPRECATION_WARNINGS
-            scale->var_values[VAR_S2R_MAIN_POS] = in->pkt_pos == -1 ? NAN : in->pkt_pos;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
         } else {
             scale->var_values[VAR_N] = inl->frame_count_out;
             scale->var_values[VAR_T] = TS2T(in->pts, link->time_base);
-#if FF_API_FRAME_PKT
-FF_DISABLE_DEPRECATION_WARNINGS
-            scale->var_values[VAR_POS] = in->pkt_pos == -1 ? NAN : in->pkt_pos;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
         }
 
         link->dst->inputs[0]->format        = in->format;
@@ -880,6 +843,7 @@ scale:
     out->height = outlink->h;
     out->color_range = outlink->color_range;
     out->colorspace = outlink->colorspace;
+    out->alpha_mode = outlink->alpha_mode;
     if (scale->out_chroma_loc != AVCHROMA_LOC_UNSPECIFIED)
         out->chroma_location = scale->out_chroma_loc;
     if (scale->out_primaries != -1)
@@ -897,10 +861,14 @@ scale:
                                            AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
     }
 
-    av_reduce(&out->sample_aspect_ratio.num, &out->sample_aspect_ratio.den,
-              (int64_t)in->sample_aspect_ratio.num * outlink->h * link->w,
-              (int64_t)in->sample_aspect_ratio.den * outlink->w * link->h,
-              INT_MAX);
+    if (scale->reset_sar) {
+        out->sample_aspect_ratio = outlink->sample_aspect_ratio;
+    } else {
+        av_reduce(&out->sample_aspect_ratio.num, &out->sample_aspect_ratio.den,
+                (int64_t)in->sample_aspect_ratio.num * outlink->h * link->w,
+                (int64_t)in->sample_aspect_ratio.den * outlink->w * link->h,
+                INT_MAX);
+    }
 
     if (sws_is_noop(out, in)) {
         av_frame_free(&out);
@@ -975,11 +943,6 @@ static int do_scale(FFFrameSync *fs)
         if (scale->eval_mode == EVAL_MODE_FRAME) {
             scale->var_values[VAR_REF_N] = rl->frame_count_out;
             scale->var_values[VAR_REF_T] = TS2T(ref->pts, reflink->time_base);
-#if FF_API_FRAME_PKT
-FF_DISABLE_DEPRECATION_WARNINGS
-            scale->var_values[VAR_REF_POS] = ref->pkt_pos == -1 ? NAN : ref->pkt_pos;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
         }
     }
 
@@ -1040,11 +1003,6 @@ static int filter_frame_ref(AVFilterLink *link, AVFrame *in)
     if (scale->eval_mode == EVAL_MODE_FRAME) {
         scale->var_values[VAR_N] = l->frame_count_out;
         scale->var_values[VAR_T] = TS2T(in->pts, link->time_base);
-#if FF_API_FRAME_PKT
-FF_DISABLE_DEPRECATION_WARNINGS
-        scale->var_values[VAR_POS] = in->pkt_pos == -1 ? NAN : in->pkt_pos;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
     }
 
     return ff_filter_frame(outlink, in);
@@ -1124,10 +1082,12 @@ static const AVOption scale_options[] = {
         { "bt601",       NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_SPC_BT470BG},        0, 0, FLAGS, .unit = "color" },
         { "bt470",       NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_SPC_BT470BG},        0, 0, FLAGS, .unit = "color" },
         { "smpte170m",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_SPC_BT470BG},        0, 0, FLAGS, .unit = "color" },
+        { "bt470bg",     NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_SPC_BT470BG},        0, 0, FLAGS, .unit = "color" },
         { "bt709",       NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_SPC_BT709},          0, 0, FLAGS, .unit = "color" },
         { "fcc",         NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_SPC_FCC},            0, 0, FLAGS, .unit = "color" },
         { "smpte240m",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_SPC_SMPTE240M},      0, 0, FLAGS, .unit = "color" },
         { "bt2020",      NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_SPC_BT2020_NCL},     0, 0, FLAGS, .unit = "color" },
+        { "bt2020nc",    NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_SPC_BT2020_NCL},     0, 0, FLAGS, .unit = "color" },
     {  "in_range", "set input color range",  OFFSET( in_range), AV_OPT_TYPE_INT, {.i64 = AVCOL_RANGE_UNSPECIFIED }, 0, 2, FLAGS, .unit = "range" },
     { "out_range", "set output color range", OFFSET(out_range), AV_OPT_TYPE_INT, {.i64 = AVCOL_RANGE_UNSPECIFIED }, 0, 2, FLAGS, .unit = "range" },
         { "auto",        NULL, 0, AV_OPT_TYPE_CONST, {.i64=AVCOL_RANGE_UNSPECIFIED }, 0, 0, FLAGS, .unit = "range" },

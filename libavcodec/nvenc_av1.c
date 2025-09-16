@@ -156,6 +156,8 @@ static const AVOption options[] = {
                                                             OFFSET(extra_sei),    AV_OPT_TYPE_BOOL,  { .i64 = 1 }, 0, 1, VE },
     { "a53cc",        "Use A53 Closed Captions (if available)", OFFSET(a53_cc),   AV_OPT_TYPE_BOOL,  { .i64 = 1 }, 0, 1, VE },
     { "s12m_tc",      "Use timecode (if available)",        OFFSET(s12m_tc),      AV_OPT_TYPE_BOOL,  { .i64 = 1 }, 0, 1, VE },
+    { "cbr_padding",  "Pad the bitstream to ensure bitrate does not drop below the target in CBR mode",
+                                                            OFFSET(cbr_padding),  AV_OPT_TYPE_BOOL,  { .i64 = 0 }, 0, 1, VE },
 #ifdef NVENC_HAVE_H264_AND_AV1_TEMPORAL_FILTER
     { "tf_level",     "Specifies the strength of the temporal filtering",
                                                             OFFSET(tf_level),     AV_OPT_TYPE_INT,   { .i64 = -1 }, -1, INT_MAX, VE, .unit = "tf_level" },
@@ -214,7 +216,7 @@ const FFCodec ff_av1_nvenc_encoder = {
     .priv_data_size = sizeof(NvencContext),
     .p.priv_class   = &av1_nvenc_class,
     .defaults       = defaults,
-    .p.pix_fmts     = ff_nvenc_pix_fmts,
+    CODEC_PIXFMTS_ARRAY(ff_nvenc_pix_fmts),
     .color_ranges   = AVCOL_RANGE_MPEG | AVCOL_RANGE_JPEG,
     .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_HARDWARE |
                       AV_CODEC_CAP_ENCODER_FLUSH | AV_CODEC_CAP_DR1 |

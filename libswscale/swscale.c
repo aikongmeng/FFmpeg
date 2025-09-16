@@ -586,7 +586,7 @@ static void solve_range_convert(uint16_t src_min, uint16_t src_max,
 
 static void init_range_convert_constants(SwsInternal *c)
 {
-    const int bit_depth = c->dstBpc ? c->dstBpc : 8;
+    const int bit_depth = c->dstBpc ? FFMIN(c->dstBpc, 16) : 8;
     const int src_bits = bit_depth <= 14 ? 15 : 19;
     const int src_shift = src_bits - bit_depth;
     const int mult_shift = bit_depth <= 14 ? 14 : 18;
@@ -623,7 +623,7 @@ av_cold void ff_sws_init_range_convert(SwsInternal *c)
 {
     c->lumConvertRange = NULL;
     c->chrConvertRange = NULL;
-    if (c->opts.src_range != c->opts.dst_range && !isAnyRGB(c->opts.dst_format)) {
+    if (c->opts.src_range != c->opts.dst_range && !isAnyRGB(c->opts.dst_format) && c->dstBpc < 32) {
         init_range_convert_constants(c);
         if (c->dstBpc <= 14) {
             if (c->opts.src_range) {

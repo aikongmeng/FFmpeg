@@ -1094,7 +1094,7 @@ const FFCodec ff_ ## short_name ## _mediacodec_encoder = {              \
                         AV_CODEC_CAP_HARDWARE |                         \
                         AV_CODEC_CAP_ENCODER_FLUSH,                     \
     .priv_data_size   = sizeof(MediaCodecEncContext),                   \
-    .p.pix_fmts       = avc_pix_fmts,                                   \
+    CODEC_PIXFMTS_ARRAY(avc_pix_fmts),                                  \
     .color_ranges   = AVCOL_RANGE_MPEG | AVCOL_RANGE_JPEG,              \
     .defaults         = mediacodec_defaults,                            \
     .init             = mediacodec_init,                                \
@@ -1352,7 +1352,7 @@ static const AVOption vp9_options[] = {
                 0, AV_OPT_TYPE_CONST, { .i64 = VP9Level52 },  0, 0, VE,  .unit = "level" },
     { "6",     "Level 6",
                 0, AV_OPT_TYPE_CONST, { .i64 = VP9Level6  },  0, 0, VE,  .unit = "level" },
-    { "6.1",   "Level 4.1",
+    { "6.1",   "Level 6.1",
                 0, AV_OPT_TYPE_CONST, { .i64 = VP9Level61 },  0, 0, VE,  .unit = "level" },
     { "6.2",   "Level 6.2",
                 0, AV_OPT_TYPE_CONST, { .i64 = VP9Level62 },  0, 0, VE,  .unit = "level" },

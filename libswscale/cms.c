@@ -29,7 +29,7 @@
 #include "cms.h"
 #include "csputils.h"
 #include "libswscale/swscale.h"
-#include "utils.h"
+#include "format.h"
 
 bool ff_sws_color_map_noop(const SwsColorMap *map)
 {
@@ -400,7 +400,7 @@ static void st2094_pick_knee(float src_max, float src_min, float src_avg,
     adapted = fmixf(dst_min, dst_max, target);
 
     /**
-     * Choose the destnation knee by picking the perceptual adaptation point
+     * Choose the destination knee by picking the perceptual adaptation point
      * between the source knee and the desired target. This moves the knee
      * point, on the vertical axis, closer to the 1:1 (neutral) line.
      *

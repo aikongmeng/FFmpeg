@@ -1960,8 +1960,8 @@ static int mkv_write_track(AVFormatContext *s, MatroskaMuxContext *mkv,
 
         // look for a codec ID string specific to mkv to use,
         // if none are found, use AVI codes
-        if (par->codec_id == AV_CODEC_ID_FFV1) {
-            /* FFV1 is actually supported natively in Matroska,
+        if (par->codec_id == AV_CODEC_ID_JPEG2000) {
+            /* JPEG2000 is actually supported natively in Matroska,
              * yet we use the VfW way to mux it for compatibility
              * with old demuxers. (FIXME: Are they really important?) */
         } else if (par->codec_id != AV_CODEC_ID_RAWVIDEO || par->codec_tag) {
@@ -2869,7 +2869,7 @@ static int mkv_write_block(void *logctx, MatroskaMuxContext *mkv,
             size_t payload_size = sizeof(t35_buf) - 6;
 
             bytestream_put_byte(&payload, ITU_T_T35_COUNTRY_CODE_US);
-            bytestream_put_be16(&payload, ITU_T_T35_PROVIDER_CODE_SMTPE);
+            bytestream_put_be16(&payload, ITU_T_T35_PROVIDER_CODE_SAMSUNG);
             bytestream_put_be16(&payload, 0x01); // provider_oriented_code
             bytestream_put_byte(&payload, 0x04); // application_identifier
 
@@ -3601,11 +3601,7 @@ const FFOutputFormat ff_matroska_muxer = {
     .write_packet      = mkv_write_flush_packet,
     .write_trailer     = mkv_write_trailer,
     .p.flags           = AVFMT_GLOBALHEADER | AVFMT_VARIABLE_FPS |
-#if FF_API_ALLOW_FLUSH
-                         AVFMT_TS_NONSTRICT | AVFMT_ALLOW_FLUSH,
-#else
                          AVFMT_TS_NONSTRICT,
-#endif
     .p.codec_tag       = (const AVCodecTag* const []){
          ff_codec_bmp_tags, ff_codec_wav_tags,
          additional_audio_tags, additional_subtitle_tags, 0
@@ -3645,11 +3641,7 @@ const FFOutputFormat ff_webm_muxer = {
     .query_codec       = webm_query_codec,
     .check_bitstream   = mkv_check_bitstream,
     .p.flags           = AVFMT_GLOBALHEADER | AVFMT_VARIABLE_FPS |
-#if FF_API_ALLOW_FLUSH
-                         AVFMT_TS_NONSTRICT | AVFMT_ALLOW_FLUSH,
-#else
                          AVFMT_TS_NONSTRICT,
-#endif
     .p.priv_class      = &matroska_webm_class,
     .flags_internal    = FF_OFMT_FLAG_ALLOW_FLUSH,
 };
@@ -3671,12 +3663,7 @@ const FFOutputFormat ff_matroska_audio_muxer = {
     .write_packet      = mkv_write_flush_packet,
     .write_trailer     = mkv_write_trailer,
     .check_bitstream   = mkv_check_bitstream,
-#if FF_API_ALLOW_FLUSH
-    .p.flags           = AVFMT_GLOBALHEADER | AVFMT_TS_NONSTRICT |
-                         AVFMT_ALLOW_FLUSH,
-#else
     .p.flags           = AVFMT_GLOBALHEADER | AVFMT_TS_NONSTRICT,
-#endif
     .p.codec_tag       = (const AVCodecTag* const []){
         ff_codec_wav_tags, additional_audio_tags, 0
     },

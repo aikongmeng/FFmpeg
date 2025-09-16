@@ -214,6 +214,10 @@ static int update_stream_avctx(AVFormatContext *s)
     return 0;
 }
 
+static av_always_inline int is_id3v2_format(const AVInputFormat *fmt) {
+    return ffifmt(fmt)->flags_internal & FF_INFMT_FLAG_ID3V2_AUTO;
+}
+
 int avformat_open_input(AVFormatContext **ps, const char *filename,
                         const AVInputFormat *fmt, AVDictionary **options)
 {
@@ -302,7 +306,7 @@ int avformat_open_input(AVFormatContext **ps, const char *filename,
     }
 
     /* e.g. AVFMT_NOFILE formats will not have an AVIOContext */
-    if (s->pb)
+    if (s->pb && is_id3v2_format(s->iformat))
         ff_id3v2_read_dict(s->pb, &si->id3v2_meta, ID3v2_DEFAULT_MAGIC, &id3v2_extra_meta);
 
     if (ffifmt(s->iformat)->read_header)
@@ -321,16 +325,12 @@ int avformat_open_input(AVFormatContext **ps, const char *filename,
     }
 
     if (id3v2_extra_meta) {
-        if (!strcmp(s->iformat->name, "mp3") || !strcmp(s->iformat->name, "aac") ||
-            !strcmp(s->iformat->name, "tta") || !strcmp(s->iformat->name, "wav")) {
-            if ((ret = ff_id3v2_parse_apic(s, id3v2_extra_meta)) < 0)
-                goto close;
-            if ((ret = ff_id3v2_parse_chapters(s, id3v2_extra_meta)) < 0)
-                goto close;
-            if ((ret = ff_id3v2_parse_priv(s, id3v2_extra_meta)) < 0)
-                goto close;
-        } else
-            av_log(s, AV_LOG_DEBUG, "demuxer does not support additional id3 data, skipping\n");
+        if ((ret = ff_id3v2_parse_apic(s, id3v2_extra_meta)) < 0)
+            goto close;
+        if ((ret = ff_id3v2_parse_chapters(s, id3v2_extra_meta)) < 0)
+            goto close;
+        if ((ret = ff_id3v2_parse_priv(s, id3v2_extra_meta)) < 0)
+            goto close;
         ff_id3v2_free_extra_meta(&id3v2_extra_meta);
     }
 
@@ -383,11 +383,10 @@ void avformat_close_input(AVFormatContext **ps)
         if (ffifmt(s->iformat)->read_close)
             ffifmt(s->iformat)->read_close(s);
 
+    ff_format_io_close(s, &pb);
     avformat_free_context(s);
 
     *ps = NULL;
-
-    avio_close(pb);
 }
 
 static void force_codec_ids(AVFormatContext *s, AVStream *st)
@@ -1293,9 +1292,15 @@ static int codec_close(FFStream *sti)
 {
     AVCodecContext *avctx_new = NULL;
     AVCodecParameters *par_tmp = NULL;
+    const AVCodec *new_codec = NULL;
     int ret;
 
-    avctx_new = avcodec_alloc_context3(sti->avctx->codec);
+    new_codec =
+      (sti->avctx->codec_id != sti->pub.codecpar->codec_id) ?
+      avcodec_find_decoder(sti->pub.codecpar->codec_id) :
+      sti->avctx->codec;
+
+    avctx_new = avcodec_alloc_context3(new_codec);
     if (!avctx_new) {
         ret = AVERROR(ENOMEM);
         goto fail;
@@ -1316,12 +1321,6 @@ static int codec_close(FFStream *sti)
         goto fail;
 
     avctx_new->pkt_timebase = sti->avctx->pkt_timebase;
-
-#if FF_API_TICKS_PER_FRAME
-FF_DISABLE_DEPRECATION_WARNINGS
-    avctx_new->ticks_per_frame = sti->avctx->ticks_per_frame;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
 
     avcodec_free_context(&sti->avctx);
     sti->avctx = avctx_new;
@@ -1502,27 +1501,6 @@ static int read_frame_internal(AVFormatContext *s, AVPacket *pkt)
             }
             sti->skip_samples = 0;
         }
-
-#if FF_API_AVSTREAM_SIDE_DATA
-        if (sti->inject_global_side_data) {
-            for (int i = 0; i < st->codecpar->nb_coded_side_data; i++) {
-                const AVPacketSideData *const src_sd = &st->codecpar->coded_side_data[i];
-                uint8_t *dst_data;
-
-                if (av_packet_get_side_data(pkt, src_sd->type, NULL))
-                    continue;
-
-                dst_data = av_packet_new_side_data(pkt, src_sd->type, src_sd->size);
-                if (!dst_data) {
-                    av_log(s, AV_LOG_WARNING, "Could not inject global side data\n");
-                    continue;
-                }
-
-                memcpy(dst_data, src_sd->data, src_sd->size);
-            }
-            sti->inject_global_side_data = 0;
-        }
-#endif
     }
 
     if (!fci->metafree) {
@@ -3081,31 +3059,6 @@ int avformat_find_stream_info(AVFormatContext *ic, AVDictionary **options)
         }
 
         sti->avctx_inited = 0;
-#if FF_API_AVSTREAM_SIDE_DATA
-FF_DISABLE_DEPRECATION_WARNINGS
-        if (st->codecpar->nb_coded_side_data > 0) {
-            av_assert0(!st->side_data && !st->nb_side_data);
-            st->side_data = av_calloc(st->codecpar->nb_coded_side_data, sizeof(*st->side_data));
-            if (!st->side_data) {
-                ret = AVERROR(ENOMEM);
-                goto find_stream_info_err;
-            }
-
-            for (int j = 0; j < st->codecpar->nb_coded_side_data; j++) {
-                uint8_t *data = av_memdup(st->codecpar->coded_side_data[j].data,
-                                          st->codecpar->coded_side_data[j].size);
-                if (!data) {
-                    ret = AVERROR(ENOMEM);
-                    goto find_stream_info_err;
-                }
-                st->side_data[j].type = st->codecpar->coded_side_data[j].type;
-                st->side_data[j].size = st->codecpar->coded_side_data[j].size;
-                st->side_data[j].data = data;
-                st->nb_side_data++;
-            }
-        }
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
     }
 
 find_stream_info_err:

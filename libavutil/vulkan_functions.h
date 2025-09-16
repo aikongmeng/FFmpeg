@@ -28,6 +28,7 @@
 /* An enum of bitflags for every optional extension we need */
 typedef uint64_t FFVulkanExtensions;
 
+/* NOTE: when adding new entries, make sure to update ff_vk_extensions_to_mask */
 #define FF_VK_EXT_EXTERNAL_DMABUF_MEMORY (1ULL <<  0) /* VK_EXT_external_memory_dma_buf */
 #define FF_VK_EXT_DRM_MODIFIER_FLAGS     (1ULL <<  1) /* VK_EXT_image_drm_format_modifier */
 #define FF_VK_EXT_EXTERNAL_FD_MEMORY     (1ULL <<  2) /* VK_KHR_external_memory_fd */
@@ -46,19 +47,25 @@ typedef uint64_t FFVulkanExtensions;
 #define FF_VK_EXT_SHADER_OBJECT          (1ULL << 13) /* VK_EXT_shader_object */
 #define FF_VK_EXT_PUSH_DESCRIPTOR        (1ULL << 14) /* VK_KHR_push_descriptor */
 #define FF_VK_EXT_RELAXED_EXTENDED_INSTR (1ULL << 15) /* VK_KHR_shader_relaxed_extended_instruction */
+#define FF_VK_EXT_EXPECT_ASSUME          (1ULL << 16) /* VK_KHR_shader_expect_assume */
+#define FF_VK_EXT_SUBGROUP_ROTATE        (1ULL << 17) /* VK_KHR_shader_subgroup_rotate */
+#define FF_VK_EXT_HOST_IMAGE_COPY        (1ULL << 18) /* VK_EXT_host_image_copy */
 
 /* Video extensions */
 #define FF_VK_EXT_VIDEO_QUEUE            (1ULL << 36) /* VK_KHR_video_queue */
 #define FF_VK_EXT_VIDEO_MAINTENANCE_1    (1ULL << 37) /* VK_KHR_video_maintenance1 */
+#define FF_VK_EXT_VIDEO_MAINTENANCE_2    (1ULL << 38) /* VK_KHR_video_maintenance2 */
 
 #define FF_VK_EXT_VIDEO_DECODE_QUEUE     (1ULL << 40) /* VK_KHR_video_decode_queue */
 #define FF_VK_EXT_VIDEO_DECODE_H264      (1ULL << 41) /* VK_KHR_video_decode_h264 */
 #define FF_VK_EXT_VIDEO_DECODE_H265      (1ULL << 42) /* VK_KHR_video_decode_h265 */
-#define FF_VK_EXT_VIDEO_DECODE_AV1       (1ULL << 43) /* VK_KHR_video_decode_av1 */
+#define FF_VK_EXT_VIDEO_DECODE_VP9       (1ULL << 43) /* VK_KHR_video_decode_vp9 */
+#define FF_VK_EXT_VIDEO_DECODE_AV1       (1ULL << 44) /* VK_KHR_video_decode_av1 */
 
 #define FF_VK_EXT_VIDEO_ENCODE_QUEUE     (1ULL << 50) /* VK_KHR_video_encode_queue */
 #define FF_VK_EXT_VIDEO_ENCODE_H264      (1ULL << 51) /* VK_KHR_video_encode_h264 */
 #define FF_VK_EXT_VIDEO_ENCODE_H265      (1ULL << 52) /* VK_KHR_video_encode_h265 */
+#define FF_VK_EXT_VIDEO_ENCODE_AV1       (1ULL << 53) /* VK_KHR_video_encode_av1 */
 
 #define FF_VK_EXT_PORTABILITY_SUBSET     (1ULL << 62)
 #define FF_VK_EXT_NO_FLAG                (1ULL << 63)
@@ -145,6 +152,7 @@ typedef uint64_t FFVulkanExtensions;
     MACRO(1, 1, FF_VK_EXT_NO_FLAG,              CmdPipelineBarrier)                      \
     MACRO(1, 1, FF_VK_EXT_NO_FLAG,              CmdCopyBufferToImage)                    \
     MACRO(1, 1, FF_VK_EXT_NO_FLAG,              CmdCopyImageToBuffer)                    \
+    MACRO(1, 1, FF_VK_EXT_NO_FLAG,              CmdClearColorImage)                                    \
     MACRO(1, 1, FF_VK_EXT_NO_FLAG,              CmdCopyBuffer)                                         \
                                                                                          \
     /* Buffer */                                                                         \
@@ -202,6 +210,11 @@ typedef uint64_t FFVulkanExtensions;
     /* sync2 */                                                                            \
     MACRO(1, 1, FF_VK_EXT_NO_FLAG,              CmdPipelineBarrier2)                       \
                                                                                            \
+    /* Host image copy */                                                                              \
+    MACRO(1, 1, FF_VK_EXT_HOST_IMAGE_COPY,      TransitionImageLayoutEXT)                              \
+    MACRO(1, 1, FF_VK_EXT_HOST_IMAGE_COPY,      CopyMemoryToImageEXT)                                  \
+    MACRO(1, 1, FF_VK_EXT_HOST_IMAGE_COPY,      CopyImageToMemoryEXT)                                  \
+                                                                                                       \
     /* Video queue */                                                                      \
     MACRO(1, 1, FF_VK_EXT_VIDEO_QUEUE,          CreateVideoSessionKHR)                     \
     MACRO(1, 1, FF_VK_EXT_VIDEO_QUEUE,          CreateVideoSessionParametersKHR)           \

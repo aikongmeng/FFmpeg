@@ -17,6 +17,7 @@
  * Ubisoft ADPCM decoder by Zane van Iperen (zane@zanevaniperen.com)
  * High Voltage Software ALP decoder by Zane van Iperen (zane@zanevaniperen.com)
  * Cunning Developments decoder by Zane van Iperen (zane@zanevaniperen.com)
+ * Sanyo LD-ADPCM decoder by Peter Ross (pross@xvid.org)
  *
  * This file is part of FFmpeg.
  *
@@ -44,6 +45,8 @@
 #include "adpcm_data.h"
 #include "codec_internal.h"
 #include "decode.h"
+
+#include "libavutil/attributes.h"
 
 /**
  * @file
@@ -260,6 +263,9 @@ static av_cold int adpcm_decode_init(AVCodecContext * avctx)
     case AV_CODEC_ID_ADPCM_IMA_AMV:
         max_channels = 1;
         break;
+    case AV_CODEC_ID_ADPCM_SANYO:
+        max_channels = 2;
+        break;
     case AV_CODEC_ID_ADPCM_AFC:
     case AV_CODEC_ID_ADPCM_EA_R1:
     case AV_CODEC_ID_ADPCM_EA_R2:
@@ -307,6 +313,10 @@ static av_cold int adpcm_decode_init(AVCodecContext * avctx)
             avctx->block_align != 17 * avctx->ch_layout.nb_channels)
             return AVERROR_INVALIDDATA;
         break;
+    case AV_CODEC_ID_ADPCM_SANYO:
+        if (avctx->bits_per_coded_sample < 3 || avctx->bits_per_coded_sample > 5)
+            return AVERROR_INVALIDDATA;
+        break;
     case AV_CODEC_ID_ADPCM_IMA_XBOX:
         if (avctx->bits_per_coded_sample != 4)
             return AVERROR_INVALIDDATA;
@@ -338,6 +348,7 @@ static av_cold int adpcm_decode_init(AVCodecContext * avctx)
     case AV_CODEC_ID_ADPCM_AFC:
     case AV_CODEC_ID_ADPCM_DTK:
     case AV_CODEC_ID_ADPCM_PSX:
+    case AV_CODEC_ID_ADPCM_SANYO:
     case AV_CODEC_ID_ADPCM_MTAF:
     case AV_CODEC_ID_ADPCM_ARGO:
     case AV_CODEC_ID_ADPCM_IMA_MOFLEX:
@@ -509,7 +520,7 @@ static inline int16_t adpcm_ima_wav_expand_nibble(ADPCMChannelStatus *c, GetBitC
     return (int16_t)c->predictor;
 }
 
-static inline int adpcm_ima_qt_expand_nibble(ADPCMChannelStatus *c, int nibble)
+int16_t ff_adpcm_ima_qt_expand_nibble(ADPCMChannelStatus *c, int nibble)
 {
     int step_index;
     int predictor;
@@ -837,6 +848,172 @@ int16_t ff_adpcm_argo_expand_nibble(ADPCMChannelStatus *cs, int nibble, int shif
     return sample;
 }
 
+static int adpcm_sanyo_expand3(ADPCMChannelStatus *c, int bits)
+{
+    int sign, delta, add;
+
+    sign = bits & 4;
+    if (sign)
+        delta = 4 - (bits & 3);
+    else
+        delta = bits;
+
+    switch (delta) {
+    case 0:
+        add = 0;
+        c->step = (3 * c->step) >> 2;
+        break;
+    case 1:
+        add = c->step;
+        c->step = (4 * c->step - (c->step >> 1)) >> 2;
+        break;
+    case 2:
+        add = 2 * c->step;
+        c->step = ((c->step >> 1) + add) >> 1;
+        break;
+    case 3:
+        add = 4 * c->step - (c->step >> 1);
+        c->step = 2 * c->step;
+        break;
+    case 4:
+        add = (11 * c->step) >> 1;
+        c->step = 3 * c->step;
+        break;
+    default:
+        av_unreachable("There are cases for all control paths when bits is 3-bit");
+    }
+
+    if (sign)
+        add = -add;
+
+    c->predictor = av_clip_int16(c->predictor + add);
+    c->step = av_clip(c->step, 1, 7281);
+    return c->predictor;
+}
+
+static int adpcm_sanyo_expand4(ADPCMChannelStatus *c, int bits)
+{
+    int sign, delta, add;
+
+    sign = bits & 8;
+    if (sign)
+        delta = 8 - (bits & 7);
+    else
+        delta = bits;
+
+    switch (delta) {
+    case 0:
+        add = 0;
+        c->step = (3 * c->step) >> 2;
+        break;
+    case 1:
+        add = c->step;
+        c->step = (3 * c->step) >> 2;
+        break;
+    case 2:
+        add = 2 * c->step;
+        break;
+    case 3:
+        add = 3 * c->step;
+        break;
+    case 4:
+        add = 4 * c->step;
+        break;
+    case 5:
+        add = (11 * c->step) >> 1;
+        c->step += c->step >> 2;
+        break;
+    case 6:
+        add = (15 * c->step) >> 1;
+        c->step = 2 * c->step;
+        break;
+    case 7:
+        if (sign)
+            add = (19 * c->step) >> 1;
+        else
+            add = (21 * c->step) >> 1;
+        c->step = (c->step >> 1) + 2 * c->step;
+        break;
+    case 8:
+        add = (25 * c->step) >> 1;
+        c->step = 5 * c->step;
+        break;
+    default:
+        av_unreachable("There are cases for all control paths when bits is 4-bit");
+    }
+
+    if (sign)
+        add = -add;
+
+    c->predictor = av_clip_int16(c->predictor + add);
+    c->step = av_clip(c->step, 1, 2621);
+    return c->predictor;
+}
+
+static int adpcm_sanyo_expand5(ADPCMChannelStatus *c, int bits)
+{
+    int sign, delta, add;
+
+    sign = bits & 0x10;
+    if (sign)
+        delta = 16 - (bits & 0xF);
+    else
+        delta = bits;
+
+    add = delta * c->step;
+    switch (delta) {
+    case 0:
+        c->step += (c->step >> 2) - (c->step >> 1);
+        break;
+    case 1:
+    case 2:
+    case 3:
+        c->step += (c->step >> 3) - (c->step >> 2);
+        break;
+    case 4:
+    case 5:
+        c->step += (c->step >> 4) - (c->step >> 3);
+        break;
+    case 6:
+        break;
+    case 7:
+        c->step += c->step >> 3;
+        break;
+    case 8:
+        c->step += c->step >> 2;
+        break;
+    case 9:
+        c->step += c->step >> 1;
+        break;
+    case 10:
+        c->step = 2 * c->step - (c->step >> 3);
+        break;
+    case 11:
+        c->step = 2 * c->step + (c->step >> 3);
+        break;
+    case 12:
+        c->step = 2 * c->step + (c->step >> 1) - (c->step >> 3);
+        break;
+    case 13:
+        c->step = 3 * c->step - (c->step >> 2);
+        break;
+    case 14:
+        c->step *= 3;
+        break;
+    case 15:
+    case 16:
+        c->step = (7 * c->step) >> 1;
+        break;
+    }
+
+    if (sign)
+        add = -add;
+
+    c->predictor = av_clip_int16(c->predictor + add);
+    c->step = av_clip(c->step, 1, 1024);
+    return c->predictor;
+}
+
 /**
  * Get the number of samples (per channel) that will be decoded from the packet.
  * In one case, this is actually the maximum number of samples possible to
@@ -1072,6 +1249,11 @@ static int get_nb_samples(AVCodecContext *avctx, GetByteContext *gb,
     case AV_CODEC_ID_ADPCM_ZORK:
         nb_samples = buf_size / ch;
         break;
+    case AV_CODEC_ID_ADPCM_SANYO:
+        if (!avctx->extradata || avctx->extradata_size != 2)
+            return AVERROR_INVALIDDATA;
+        nb_samples = AV_RL16(avctx->extradata);
+        break;
     }
 
     /* validate coded sample count */
@@ -1155,8 +1337,8 @@ static int adpcm_decode_frame(AVCodecContext *avctx, AVFrame *frame,
 
             for (int m = 0; m < 64; m += 2) {
                 int byte = bytestream2_get_byteu(&gb);
-                samples[m    ] = adpcm_ima_qt_expand_nibble(cs, byte & 0x0F);
-                samples[m + 1] = adpcm_ima_qt_expand_nibble(cs, byte >> 4  );
+                samples[m    ] = ff_adpcm_ima_qt_expand_nibble(cs, byte & 0x0F);
+                samples[m + 1] = ff_adpcm_ima_qt_expand_nibble(cs, byte >> 4  );
             }
         }
         ) /* End of CASE */
@@ -1509,16 +1691,16 @@ static int adpcm_decode_frame(AVCodecContext *avctx, AVFrame *frame,
     CASE(ADPCM_IMA_SSI,
         for (int n = nb_samples >> (1 - st); n > 0; n--) {
             int v = bytestream2_get_byteu(&gb);
-            *samples++ = adpcm_ima_qt_expand_nibble(&c->status[0],  v >> 4  );
-            *samples++ = adpcm_ima_qt_expand_nibble(&c->status[st], v & 0x0F);
+            *samples++ = ff_adpcm_ima_qt_expand_nibble(&c->status[0],  v >> 4  );
+            *samples++ = ff_adpcm_ima_qt_expand_nibble(&c->status[st], v & 0x0F);
         }
         ) /* End of CASE */
     CASE(ADPCM_IMA_APM,
         for (int n = nb_samples / 2; n > 0; n--) {
             for (int channel = 0; channel < channels; channel++) {
                 int v = bytestream2_get_byteu(&gb);
-                *samples++  = adpcm_ima_qt_expand_nibble(&c->status[channel], v >> 4  );
-                samples[st] = adpcm_ima_qt_expand_nibble(&c->status[channel], v & 0x0F);
+                *samples++  = ff_adpcm_ima_qt_expand_nibble(&c->status[channel], v >> 4  );
+                samples[st] = ff_adpcm_ima_qt_expand_nibble(&c->status[channel], v & 0x0F);
             }
             samples += channels;
         }
@@ -1974,8 +2156,8 @@ static int adpcm_decode_frame(AVCodecContext *avctx, AVFrame *frame,
         for (int n = nb_samples >> (1 - st); n > 0; n--) {
             int v = bytestream2_get_byteu(&gb);
 
-            *samples++ = adpcm_ima_qt_expand_nibble(&c->status[0 ], v >> 4 );
-            *samples++ = adpcm_ima_qt_expand_nibble(&c->status[st], v & 0xf);
+            *samples++ = ff_adpcm_ima_qt_expand_nibble(&c->status[0 ], v >> 4 );
+            *samples++ = ff_adpcm_ima_qt_expand_nibble(&c->status[st], v & 0xf);
         }
         ) /* End of CASE */
     CASE(ADPCM_CT,
@@ -2265,6 +2447,29 @@ static int adpcm_decode_frame(AVCodecContext *avctx, AVFrame *frame,
             }
         }
         ) /* End of CASE */
+    CASE(ADPCM_SANYO,
+        int (*expand)(ADPCMChannelStatus *c, int bits);
+        GetBitContext g;
+
+        switch(avctx->bits_per_coded_sample) {
+        case 3: expand = adpcm_sanyo_expand3; break;
+        case 4: expand = adpcm_sanyo_expand4; break;
+        case 5: expand = adpcm_sanyo_expand5; break;
+        }
+
+        for (int ch = 0; ch < channels; ch++) {
+            c->status[ch].predictor = sign_extend(bytestream2_get_le16(&gb), 16);
+            c->status[ch].step = sign_extend(bytestream2_get_le16(&gb), 16);
+        }
+
+        init_get_bits8(&g, gb.buffer, bytestream2_get_bytes_left(&gb));
+        for (int i = 0; i < nb_samples; i++)
+            for (int ch = 0; ch < channels; ch++)
+                samples_p[ch][i] = expand(&c->status[ch], get_bits_le(&g, avctx->bits_per_coded_sample));
+
+        align_get_bits(&g);
+        bytestream2_skip(&gb, get_bits_count(&g) / 8);
+        ) /* End of CASE */
     CASE(ADPCM_ARGO,
         /*
          * The format of each block:
@@ -2319,7 +2524,7 @@ static int adpcm_decode_frame(AVCodecContext *avctx, AVFrame *frame,
         }
         ) /* End of CASE */
     default:
-        av_assert0(0); // unsupported codec_id should not happen
+        av_unreachable("There are cases for all codec ids using adpcm_decode_frame");
     }
 
     if (avpkt->size && bytestream2_tell(&gb) == 0) {
@@ -2337,7 +2542,7 @@ static int adpcm_decode_frame(AVCodecContext *avctx, AVFrame *frame,
     return bytestream2_tell(&gb);
 }
 
-static void adpcm_flush(AVCodecContext *avctx)
+static av_cold void adpcm_flush(AVCodecContext *avctx)
 {
     ADPCMDecodeContext *c = avctx->priv_data;
 
@@ -2395,7 +2600,7 @@ const FFCodec ff_ ## name_ ## _decoder = {                  \
     .p.type         = AVMEDIA_TYPE_AUDIO,                   \
     .p.id           = id_,                                  \
     .p.capabilities = AV_CODEC_CAP_DR1,                     \
-    .p.sample_fmts  = sample_fmts_,                         \
+    CODEC_SAMPLEFMTS_ARRAY(sample_fmts_),                   \
     .priv_data_size = sizeof(ADPCMDecodeContext),           \
     .init           = adpcm_decode_init,                    \
     FF_CODEC_DECODE_CB(adpcm_decode_frame),                 \
@@ -2448,6 +2653,7 @@ ADPCM_DECODER(ADPCM_IMA_XBOX,    sample_fmts_s16p, adpcm_ima_xbox,    "ADPCM IMA
 ADPCM_DECODER(ADPCM_MS,          sample_fmts_both, adpcm_ms,          "ADPCM Microsoft")
 ADPCM_DECODER(ADPCM_MTAF,        sample_fmts_s16p, adpcm_mtaf,        "ADPCM MTAF")
 ADPCM_DECODER(ADPCM_PSX,         sample_fmts_s16p, adpcm_psx,         "ADPCM Playstation")
+ADPCM_DECODER(ADPCM_SANYO,       sample_fmts_s16p, adpcm_sanyo,       "ADPCM Sanyo")
 ADPCM_DECODER(ADPCM_SBPRO_2,     sample_fmts_s16,  adpcm_sbpro_2,     "ADPCM Sound Blaster Pro 2-bit")
 ADPCM_DECODER(ADPCM_SBPRO_3,     sample_fmts_s16,  adpcm_sbpro_3,     "ADPCM Sound Blaster Pro 2.6-bit")
 ADPCM_DECODER(ADPCM_SBPRO_4,     sample_fmts_s16,  adpcm_sbpro_4,     "ADPCM Sound Blaster Pro 4-bit")

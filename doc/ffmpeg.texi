@@ -376,7 +376,7 @@ which they are placed.
 These  examples can of course be further generalized into arbitrary remappings
 of any number of inputs into any number of outputs.
 
-@section Trancoding
+@section Transcoding
 @emph{Transcoding} is the process of decoding a stream and then encoding it
 again. Since encoding tends to be computationally expensive and in most cases
 degrades the stream quality (i.e. it is @emph{lossy}), you should only transcode
@@ -443,7 +443,7 @@ that simple filtergraphs are tied to their output stream, so e.g. if you have
 multiple audio streams, @option{-af} will create a separate filtergraph for each
 one.
 
-Taking the trancoding example from above, adding filtering (and omitting audio,
+Taking the transcoding example from above, adding filtering (and omitting audio,
 for clarity) makes it look like this:
 @verbatim
 ┌──────────┬───────────────┐
@@ -1048,7 +1048,7 @@ The following flags are available:
 
 @table @option
 @item recon_gain
-Wether to signal if recon_gain is present as metadata in parameter blocks within frames
+Whether to signal if recon_gain is present as metadata in parameter blocks within frames
 @end table
 
 @item output_gain
@@ -1373,10 +1373,25 @@ The properties where a change triggers reinitialization are,
 for video, frame resolution or pixel format;
 for audio, sample format, sample rate, channel count or channel layout.
 
+@item -drop_changed[:@var{stream_specifier}] @var{integer} (@emph{input,per-stream})
+This boolean option determines whether a frame with differing frame parameters mid-stream
+gets dropped instead of leading to filtergraph reinitialization, as that would lead to loss
+of filter state. Generally useful to avoid corrupted yet decodable packets in live streaming
+inputs. Default is false.
+
 @item -filter_threads @var{nb_threads} (@emph{global})
 Defines how many threads are used to process a filter pipeline. Each pipeline
 will produce a thread pool with this many threads available for parallel processing.
 The default is the number of available CPUs.
+
+@item -filter_buffered_frames @var{nb_frames} (@emph{global})
+Defines the maximum number of buffered frames allowed in a filtergraph. Under
+normal circumstances, a filtergraph should not buffer more than a few frames,
+especially if frames are being fed to it and read from it in a balanced way
+(which is the intended behavior in ffmpeg). That said, this option allows you
+to limit the total number of frames buffered across all links in a filtergraph.
+If more frames are generated, filtering is aborted and an error is returned.
+The default value is 0, which means no limit.
 
 @item -pre[:@var{stream_specifier}] @var{preset_name} (@emph{output,per-stream})
 Specify the preset for matching stream(s).
@@ -1387,6 +1402,16 @@ It is on by default, to explicitly disable it you need to specify @code{-nostats
 
 @item -stats_period @var{time} (@emph{global})
 Set period at which encoding progress/statistics are updated. Default is 0.5 seconds.
+
+@item -print_graphs (@emph{global})
+Prints execution graph details to stderr in the format set via -print_graphs_format.
+
+@item -print_graphs_file @var{filename} (@emph{global})
+Writes execution graph details to the specified file in the format set via -print_graphs_format.
+
+@item -print_graphs_format @var{format} (@emph{global})
+Sets the output format (available formats are: default, compact, csv, flat, ini, json, xml, mermaid, mermaidhtml)
+The default format is json.
 
 @item -progress @var{url} (@emph{global})
 Send program-friendly progress information to @var{url}.
@@ -1985,6 +2010,9 @@ transcoding, without copying the frames into the system memory.
 
 For it to work, both the decoder and the encoder must support QSV acceleration
 and no filters must be used.
+
+@item videotoolbox
+Use Video Toolbox hardware acceleration.
 @end table
 
 This option has no effect if the selected hwaccel is not available or not

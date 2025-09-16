@@ -284,7 +284,7 @@ static int parse_dsd_prop(AVFormatContext *s, AVStream *st, uint64_t eof)
                 return AVERROR_INVALIDDATA;
             st->codecpar->ch_layout.order       = AV_CHANNEL_ORDER_UNSPEC;
             st->codecpar->ch_layout.nb_channels = avio_rb16(pb);
-            if (size < 2 + st->codecpar->ch_layout.nb_channels * 4)
+            if (size < 2 + st->codecpar->ch_layout.nb_channels * 4 || !st->codecpar->ch_layout.nb_channels)
                 return AVERROR_INVALIDDATA;
             if (st->codecpar->ch_layout.nb_channels > FF_ARRAY_ELEMS(dsd_layout)) {
                 avpriv_request_sample(s, "channel layout");
@@ -510,6 +510,8 @@ static int iff_read_header(AVFormatContext *s)
                 sta->codecpar->ch_layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
             else if (sta->codecpar->ch_layout.nb_channels == 2)
                 sta->codecpar->ch_layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
+            else if (sta->codecpar->ch_layout.nb_channels == 0)
+                return AVERROR_INVALIDDATA;
             break;
 
         case ID_ABIT:
@@ -967,9 +969,6 @@ static int iff_read_packet(AVFormatContext *s,
         uint32_t chunk_id, chunk_id2;
 
         while (!avio_feof(pb)) {
-            if (avio_feof(pb))
-                return AVERROR_EOF;
-
             orig_pos  = avio_tell(pb);
             chunk_id  = avio_rl32(pb);
             data_size = avio_rb32(pb);
@@ -986,6 +985,9 @@ static int iff_read_packet(AVFormatContext *s,
                 avio_skip(pb, data_size);
             }
         }
+        if (pb->eof_reached)
+            return AVERROR_EOF;
+
         ret = av_get_packet(pb, pkt, data_size);
         pkt->stream_index = iff->video_stream_index;
         pkt->pos = orig_pos;

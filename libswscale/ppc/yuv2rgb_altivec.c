@@ -41,7 +41,7 @@
  * MODIFIED to calculate coeffs from currently selected color space.
  * MODIFIED core to be a macro where you specify the output format.
  * ADDED UYVY conversion which is never called due to some thing in swscale.
- * CORRECTED algorithim selection to be strict on input formats.
+ * CORRECTED algorithm selection to be strict on input formats.
  * ADDED runtime detection of AltiVec.
  *
  * ADDED altivec_yuv2packedX vertical scl + RGB converter
@@ -284,7 +284,7 @@ static inline void cvtyuvtoRGB(SwsInternal *c, vector signed short Y,
  * ------------------------------------------------------------------------------
  */
 
-#if !HAVE_VSX
+#if !HAVE_VEC_XL
 static inline vector unsigned char vec_xl(signed long long offset, const ubyte *addr)
 {
     const vector unsigned char *v_addr = (const vector unsigned char *) (addr + offset);
@@ -292,7 +292,7 @@ static inline vector unsigned char vec_xl(signed long long offset, const ubyte *
 
     return (vector unsigned char) vec_perm(v_addr[0], v_addr[1], align_perm);
 }
-#endif /* !HAVE_VSX */
+#endif /* !HAVE_VEC_XL */
 
 #define DEFCSP420_CVT(name, out_pixels)                                       \
 static int altivec_ ## name(SwsInternal *c, const unsigned char *const *in,   \

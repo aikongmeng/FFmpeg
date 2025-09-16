@@ -845,8 +845,6 @@ static int aac_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
     }
 
     copy_input_samples(s, frame);
-    if (s->psypp)
-        ff_psy_preprocess(s->psypp, s->planar_samples, s->channels);
 
     if (!avctx->frame_num)
         return 0;
@@ -1141,8 +1139,6 @@ static av_cold int aac_encode_end(AVCodecContext *avctx)
     av_tx_uninit(&s->mdct128);
     ff_psy_end(&s->psy);
     ff_lpc_end(&s->lpc);
-    if (s->psypp)
-        ff_psy_preprocess_end(s->psypp);
     av_freep(&s->buffer.samples);
     av_freep(&s->cpe);
     av_freep(&s->fdsp);
@@ -1235,14 +1231,13 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
     }
 
     /* Samplerate */
-    for (i = 0; i < 16; i++)
-        if (avctx->sample_rate == ff_mpeg4audio_sample_rates[i])
+    for (int i = 0;; i++) {
+        av_assert1(i < 13);
+        if (avctx->sample_rate == ff_mpeg4audio_sample_rates[i]) {
+            s->samplerate_index = i;
             break;
-    s->samplerate_index = i;
-    ERROR_IF(s->samplerate_index == 16 ||
-             s->samplerate_index >= ff_aac_swb_size_1024_len ||
-             s->samplerate_index >= ff_aac_swb_size_128_len,
-             "Unsupported sample rate %d\n", avctx->sample_rate);
+        }
+    }
 
     /* Bitrate limiting */
     WARN_IF(1024.0 * avctx->bit_rate / avctx->sample_rate > 6144 * s->channels,
@@ -1295,7 +1290,6 @@ static av_cold int aac_encode_init(AVCodecContext *avctx)
     if ((ret = ff_psy_init(&s->psy, avctx, 2, sizes, lengths,
                            s->chan_map[0], grouping)) < 0)
         return ret;
-    s->psypp = ff_psy_preprocess_init(avctx);
     ff_lpc_init(&s->lpc, 2*avctx->frame_size, TNS_MAX_ORDER, FF_LPC_TYPE_LEVINSON);
     s->random_state = 0x1f2e3d4c;
 
@@ -1344,9 +1338,8 @@ const FFCodec ff_aac_encoder = {
     FF_CODEC_ENCODE_CB(aac_encode_frame),
     .close          = aac_encode_end,
     .defaults       = aac_encode_defaults,
-    .p.supported_samplerates = ff_mpeg4audio_sample_rates,
+    CODEC_SAMPLERATES_ARRAY(ff_mpeg4audio_sample_rates),
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
-    .p.sample_fmts  = (const enum AVSampleFormat[]){ AV_SAMPLE_FMT_FLTP,
-                                                     AV_SAMPLE_FMT_NONE },
+    CODEC_SAMPLEFMTS(AV_SAMPLE_FMT_FLTP),
     .p.priv_class   = &aacenc_class,
 };

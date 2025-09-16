@@ -498,8 +498,13 @@ int ff_http_do_new_request2(URLContext *h, const char *uri, AVDictionary **opts)
     av_url_split(proto2, sizeof(proto2), NULL, 0,
                  hostname2, sizeof(hostname2), &port2,
                  NULL, 0, uri);
+    if (strcmp(proto1, proto2) != 0) {
+        av_log(h, AV_LOG_INFO, "Cannot reuse HTTP connection for different protocol %s vs %s\n",
+               proto1, proto2);
+        return AVERROR(EINVAL);
+    }
     if (port1 != port2 || strncmp(hostname1, hostname2, sizeof(hostname2)) != 0) {
-        av_log(h, AV_LOG_ERROR, "Cannot reuse HTTP connection for different host: %s:%d != %s:%d\n",
+        av_log(h, AV_LOG_INFO, "Cannot reuse HTTP connection for different host: %s:%d != %s:%d\n",
             hostname1, port1,
             hostname2, port2
         );
@@ -555,6 +560,12 @@ int ff_http_averror(int status_code, int default_averror)
         return AVERROR_HTTP_SERVER_ERROR;
     else
         return default_averror;
+}
+
+const char* ff_http_get_new_location(URLContext *h)
+{
+    HTTPContext *s = h->priv_data;
+    return s->new_location;
 }
 
 static int http_write_reply(URLContext* h, int status_code)
@@ -1327,7 +1338,7 @@ static int get_cookies(HTTPContext *s, char **cookies, const char *path,
             }
         }
 
-        // if no domain in the cookie assume it appied to this request
+        // if no domain in the cookie assume it applied to this request
         if ((e = av_dict_get(cookie_params, "domain", NULL, 0)) && e->value) {
             // find the offset comparison is on the min domain (b.com, not a.b.com)
             int domain_offset = strlen(domain) - strlen(e->value);

@@ -304,7 +304,7 @@ static int decode_str(AVFormatContext *s, AVIOContext *pb, int encoding,
         }
         break;
     default:
-        av_log(s, AV_LOG_WARNING, "Unknown encoding\n");
+        av_log(s, AV_LOG_WARNING, "Unknown encoding %d\n", encoding);
     }
 
     if (ch)
@@ -1012,7 +1012,7 @@ static void id3v2_parse(AVIOContext *pb, AVDictionary **metadata,
                 if (tcomp) {
                     int err;
 
-                    av_log(s, AV_LOG_DEBUG, "Compresssed frame %s tlen=%d dlen=%ld\n", tag, tlen, dlen);
+                    av_log(s, AV_LOG_DEBUG, "Compressed frame %s tlen=%d dlen=%ld\n", tag, tlen, dlen);
 
                     if (tlen <= 0)
                         goto seek;

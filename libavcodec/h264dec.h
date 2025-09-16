@@ -305,11 +305,11 @@ typedef struct H264SliceContext {
 
     DECLARE_ALIGNED(8, uint16_t, sub_mb_type)[4];
 
-    ///< as a DCT coefficient is int32_t in high depth, we need to reserve twice the space.
+    /// as a DCT coefficient is int32_t in high depth, we need to reserve twice the space.
     DECLARE_ALIGNED(16, int16_t, mb)[16 * 48 * 2];
     DECLARE_ALIGNED(16, int16_t, mb_luma_dc)[3][16 * 2];
-    ///< as mb is addressed by scantable[i] and scantable is uint8_t we can either
-    ///< check that i is not too large or ensure that there is some unused stuff after mb
+    /// as mb is addressed by scantable[i] and scantable is uint8_t we can either
+    /// check that i is not too large or ensure that there is some unused stuff after mb
     int16_t mb_padding[256 * 2];
 
     uint8_t (*mvd_table[2])[2];
@@ -541,7 +541,7 @@ typedef struct H264Context {
      * all subsequently output fraames are also marked as recovered
      *
      * In effect, if you want all subsequent DECODED frames marked as recovered, set frame_recovered
-     * If you want all subsequent DISPAYED frames marked as recovered, set the frame->recovered
+     * If you want all subsequent DISPLAYED frames marked as recovered, set the frame->recovered
      */
     int frame_recovered;
 

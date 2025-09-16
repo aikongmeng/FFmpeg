@@ -34,8 +34,11 @@
 #include "libavutil/imgutils.h"
 #include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/timecode_internal.h"
 #include "libavutil/mathematics.h"
 #include "libavutil/mastering_display_metadata.h"
+#include "libavutil/stereo3d.h"
+#include "libavutil/tdrdi.h"
 #include "atsc_a53.h"
 #include "codec_desc.h"
 #include "encode.h"
@@ -65,6 +68,7 @@ const enum AVPixelFormat ff_nvenc_pix_fmts[] = {
     AV_PIX_FMT_P210,
     AV_PIX_FMT_P216,
 #endif
+    AV_PIX_FMT_YUV444P10MSB,
     AV_PIX_FMT_YUV444P16, // Truncated to 10bits
     AV_PIX_FMT_0RGB32,
     AV_PIX_FMT_RGB32,
@@ -73,6 +77,7 @@ const enum AVPixelFormat ff_nvenc_pix_fmts[] = {
     AV_PIX_FMT_X2RGB10,
     AV_PIX_FMT_X2BGR10,
     AV_PIX_FMT_GBRP,
+    AV_PIX_FMT_GBRP10MSB,
     AV_PIX_FMT_GBRP16,    // Truncated to 10bits
     AV_PIX_FMT_CUDA,
 #if CONFIG_D3D11VA
@@ -91,13 +96,15 @@ const AVCodecHWConfigInternal *const ff_nvenc_hw_configs[] = {
     NULL,
 };
 
-#define IS_10BIT(pix_fmt)  (pix_fmt == AV_PIX_FMT_P010      || \
-                            pix_fmt == AV_PIX_FMT_P016      || \
-                            pix_fmt == AV_PIX_FMT_P210      || \
-                            pix_fmt == AV_PIX_FMT_P216      || \
-                            pix_fmt == AV_PIX_FMT_YUV444P16 || \
-                            pix_fmt == AV_PIX_FMT_X2RGB10   || \
-                            pix_fmt == AV_PIX_FMT_X2BGR10   || \
+#define IS_10BIT(pix_fmt)  (pix_fmt == AV_PIX_FMT_P010         || \
+                            pix_fmt == AV_PIX_FMT_P016         || \
+                            pix_fmt == AV_PIX_FMT_P210         || \
+                            pix_fmt == AV_PIX_FMT_P216         || \
+                            pix_fmt == AV_PIX_FMT_YUV444P10MSB || \
+                            pix_fmt == AV_PIX_FMT_YUV444P16    || \
+                            pix_fmt == AV_PIX_FMT_X2RGB10      || \
+                            pix_fmt == AV_PIX_FMT_X2BGR10      || \
+                            pix_fmt == AV_PIX_FMT_GBRP10MSB    || \
                             pix_fmt == AV_PIX_FMT_GBRP16)
 
 #define IS_RGB(pix_fmt)    (pix_fmt == AV_PIX_FMT_0RGB32  || \
@@ -107,17 +114,20 @@ const AVCodecHWConfigInternal *const ff_nvenc_hw_configs[] = {
                             pix_fmt == AV_PIX_FMT_X2RGB10 || \
                             pix_fmt == AV_PIX_FMT_X2BGR10)
 
-#define IS_YUV444(pix_fmt) (pix_fmt == AV_PIX_FMT_YUV444P   || \
-                            pix_fmt == AV_PIX_FMT_YUV444P16 || \
-                            pix_fmt == AV_PIX_FMT_GBRP      || \
-                            pix_fmt == AV_PIX_FMT_GBRP16    || \
+#define IS_YUV444(pix_fmt) (pix_fmt == AV_PIX_FMT_YUV444P      || \
+                            pix_fmt == AV_PIX_FMT_YUV444P10MSB || \
+                            pix_fmt == AV_PIX_FMT_YUV444P16    || \
+                            pix_fmt == AV_PIX_FMT_GBRP         || \
+                            pix_fmt == AV_PIX_FMT_GBRP10MSB    || \
+                            pix_fmt == AV_PIX_FMT_GBRP16       || \
                             (ctx->rgb_mode == NVENC_RGB_MODE_444 && IS_RGB(pix_fmt)))
 
 #define IS_YUV422(pix_fmt) (pix_fmt == AV_PIX_FMT_NV16 || \
                             pix_fmt == AV_PIX_FMT_P210 || \
                             pix_fmt == AV_PIX_FMT_P216)
 
-#define IS_GBRP(pix_fmt) (pix_fmt == AV_PIX_FMT_GBRP || \
+#define IS_GBRP(pix_fmt) (pix_fmt == AV_PIX_FMT_GBRP      || \
+                          pix_fmt == AV_PIX_FMT_GBRP10MSB || \
                           pix_fmt == AV_PIX_FMT_GBRP16)
 
 static const struct {
@@ -658,6 +668,14 @@ static int nvenc_check_capabilities(AVCodecContext *avctx)
 #endif
 
     ctx->support_dyn_bitrate = nvenc_check_cap(avctx, NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE);
+
+#ifdef NVENC_HAVE_MVHEVC
+    ctx->multiview_supported = nvenc_check_cap(avctx, NV_ENC_CAPS_SUPPORT_MVHEVC_ENCODE) > 0;
+    if(ctx->profile == NV_ENC_HEVC_PROFILE_MULTIVIEW_MAIN && !ctx->multiview_supported) {
+        av_log(avctx, AV_LOG_WARNING, "Multiview not supported by the device\n");
+        return AVERROR(ENOSYS);
+    }
+#endif
 
     return 0;
 }
@@ -1303,7 +1321,12 @@ static av_cold int nvenc_setup_h264_config(AVCodecContext *avctx)
     h264->idrPeriod = cc->gopLength;
 
     if (IS_CBR(cc->rcParams.rateControlMode)) {
-        h264->outputBufferingPeriodSEI = 1;
+        /* Older SDKs use outputBufferingPeriodSEI to control filler data */
+        h264->outputBufferingPeriodSEI = ctx->cbr_padding;
+
+#ifdef NVENC_HAVE_FILLER_DATA
+        h264->enableFillerDataInsertion = ctx->cbr_padding;
+#endif
     }
 
     h264->outputPictureTimingSEI = 1;
@@ -1417,6 +1440,11 @@ static av_cold int nvenc_setup_h264_config(AVCodecContext *avctx)
     }
 #endif
 
+#ifdef NVENC_HAVE_TIME_CODE
+    if (ctx->s12m_tc)
+        h264->enableTimeCode = 1;
+#endif
+
     return 0;
 }
 
@@ -1497,10 +1525,35 @@ static av_cold int nvenc_setup_hevc_config(AVCodecContext *avctx)
     hevc->idrPeriod = cc->gopLength;
 
     if (IS_CBR(cc->rcParams.rateControlMode)) {
-        hevc->outputBufferingPeriodSEI = 1;
+        /* Older SDKs use outputBufferingPeriodSEI to control filler data */
+        hevc->outputBufferingPeriodSEI = ctx->cbr_padding;
+
+#ifdef NVENC_HAVE_FILLER_DATA
+        hevc->enableFillerDataInsertion = ctx->cbr_padding;
+#endif
     }
 
     hevc->outputPictureTimingSEI = 1;
+
+#ifdef NVENC_HAVE_MVHEVC
+    if (ctx->multiview_supported && (ctx->profile == NV_ENC_HEVC_PROFILE_MAIN || ctx->profile == NV_ENC_HEVC_PROFILE_MULTIVIEW_MAIN)) {
+        const AVFrameSideData *sd_stereo3d = av_frame_side_data_get(avctx->decoded_side_data, avctx->nb_decoded_side_data, AV_FRAME_DATA_STEREO3D);
+        const AVFrameSideData *sd_tdrdi = av_frame_side_data_get(avctx->decoded_side_data, avctx->nb_decoded_side_data, AV_FRAME_DATA_3D_REFERENCE_DISPLAYS);
+        const AVStereo3D *stereo3d = sd_stereo3d ? (const AVStereo3D*)sd_stereo3d->data : NULL;
+
+        if (sd_tdrdi && stereo3d && stereo3d->type == AV_STEREO3D_FRAMESEQUENCE)
+            ctx->profile = NV_ENC_HEVC_PROFILE_MULTIVIEW_MAIN;
+
+        if (ctx->profile == NV_ENC_HEVC_PROFILE_MULTIVIEW_MAIN && stereo3d &&
+            stereo3d->type != AV_STEREO3D_2D &&
+            stereo3d->type != AV_STEREO3D_UNSPEC &&
+            stereo3d->type != AV_STEREO3D_FRAMESEQUENCE)
+        {
+            av_log(avctx, AV_LOG_WARNING, "Unsupported multiview input, disabling multiview encoding.\n");
+            ctx->profile = NV_ENC_HEVC_PROFILE_MAIN;
+        }
+    }
+#endif
 
     switch (ctx->profile) {
     case NV_ENC_HEVC_PROFILE_MAIN:
@@ -1515,6 +1568,18 @@ static av_cold int nvenc_setup_hevc_config(AVCodecContext *avctx)
         cc->profileGUID = NV_ENC_HEVC_PROFILE_FREXT_GUID;
         avctx->profile  = AV_PROFILE_HEVC_REXT;
         break;
+#ifdef NVENC_HAVE_MVHEVC
+    case NV_ENC_HEVC_PROFILE_MULTIVIEW_MAIN:
+        cc->profileGUID = NV_ENC_HEVC_PROFILE_MAIN_GUID;
+        avctx->profile  = AV_PROFILE_HEVC_MULTIVIEW_MAIN;
+        ctx->multiview  = 1;
+
+        hevc->enableMVHEVC = 1;
+        hevc->outputHevc3DReferenceDisplayInfo = 1;
+
+        av_log(avctx, AV_LOG_VERBOSE, "Enabling MV HEVC encoding.\n");
+        break;
+#endif
     }
 
     // force setting profile as main10 if input is 10 bit or if it should be encoded as 10 bit
@@ -1528,6 +1593,13 @@ static av_cold int nvenc_setup_hevc_config(AVCodecContext *avctx)
         cc->profileGUID = NV_ENC_HEVC_PROFILE_FREXT_GUID;
         avctx->profile = AV_PROFILE_HEVC_REXT;
     }
+
+#ifdef NVENC_HAVE_MVHEVC
+    if (ctx->multiview && avctx->profile != AV_PROFILE_HEVC_MULTIVIEW_MAIN) {
+        av_log(avctx, AV_LOG_ERROR, "Multiview encoding only works for Main profile content.\n");
+        return AVERROR(EINVAL);
+    }
+#endif
 
     hevc->chromaFormatIDC = IS_YUV444(ctx->data_pix_fmt) ? 3 : IS_YUV422(ctx->data_pix_fmt) ? 2 : 1;
 
@@ -1619,7 +1691,7 @@ static av_cold int nvenc_setup_av1_config(AVCodecContext *avctx)
     av1->idrPeriod = cc->gopLength;
 
     if (IS_CBR(cc->rcParams.rateControlMode)) {
-        av1->enableBitstreamPadding = 1;
+        av1->enableBitstreamPadding = ctx->cbr_padding;
     }
 
     if (ctx->tile_cols >= 0)
@@ -1794,13 +1866,7 @@ static av_cold int nvenc_setup_encoder(AVCodecContext *avctx)
         ctx->init_encode_params.frameRateDen = avctx->framerate.den;
     } else {
         ctx->init_encode_params.frameRateNum = avctx->time_base.den;
-FF_DISABLE_DEPRECATION_WARNINGS
-        ctx->init_encode_params.frameRateDen = avctx->time_base.num
-#if FF_API_TICKS_PER_FRAME
-            * avctx->ticks_per_frame
-#endif
-            ;
-FF_ENABLE_DEPRECATION_WARNINGS
+        ctx->init_encode_params.frameRateDen = avctx->time_base.num;
     }
 
 #ifdef NVENC_HAVE_UNIDIR_B
@@ -1932,7 +1998,9 @@ static NV_ENC_BUFFER_FORMAT nvenc_map_buffer_format(enum AVPixelFormat pix_fmt)
     case AV_PIX_FMT_YUV444P:
         return NV_ENC_BUFFER_FORMAT_YUV444;
     case AV_PIX_FMT_GBRP16:
+    case AV_PIX_FMT_GBRP10MSB:
     case AV_PIX_FMT_YUV444P16:
+    case AV_PIX_FMT_YUV444P10MSB:
         return NV_ENC_BUFFER_FORMAT_YUV444_10BIT;
     case AV_PIX_FMT_0RGB32:
     case AV_PIX_FMT_RGB32:
@@ -2420,7 +2488,52 @@ static int nvenc_upload_frame(AVCodecContext *avctx, const AVFrame *frame,
     }
 }
 
-static void nvenc_codec_specific_pic_params(AVCodecContext *avctx,
+#ifdef NVENC_HAVE_TIME_CODE
+static void nvenc_fill_time_code(AVCodecContext *avctx, const AVFrame *frame, NV_ENC_TIME_CODE *time_code)
+{
+    AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_S12M_TIMECODE);
+
+    if (sd) {
+        uint32_t *tc = (uint32_t*)sd->data;
+        int cnt = FFMIN(tc[0], FF_ARRAY_ELEMS(time_code->clockTimestamp));
+
+        switch (cnt) {
+            case 0:
+                time_code->displayPicStruct = NV_ENC_PIC_STRUCT_DISPLAY_FRAME;
+                time_code->skipClockTimestampInsertion = 1;
+                break;
+            case 2:
+                time_code->displayPicStruct = NV_ENC_PIC_STRUCT_DISPLAY_FRAME_DOUBLING;
+                break;
+            case 3:
+                time_code->displayPicStruct = NV_ENC_PIC_STRUCT_DISPLAY_FRAME_TRIPLING;
+                break;
+            default:
+                time_code->displayPicStruct = NV_ENC_PIC_STRUCT_DISPLAY_FRAME;
+                break;
+        }
+
+        for (int i = 0; i < cnt; i++) {
+            unsigned hh, mm, ss, ff, drop;
+            ff_timecode_set_smpte(&drop, &hh, &mm, &ss, &ff, avctx->framerate, tc[i + 1], 0, 0);
+
+            time_code->clockTimestamp[i].countingType = 0;
+            time_code->clockTimestamp[i].discontinuityFlag = 0;
+            time_code->clockTimestamp[i].cntDroppedFrames = drop;
+            time_code->clockTimestamp[i].nFrames = ff;
+            time_code->clockTimestamp[i].secondsValue = ss;
+            time_code->clockTimestamp[i].minutesValue = mm;
+            time_code->clockTimestamp[i].hoursValue = hh;
+            time_code->clockTimestamp[i].timeOffset = 0;
+        }
+    } else {
+        time_code->displayPicStruct = NV_ENC_PIC_STRUCT_DISPLAY_FRAME;
+        time_code->skipClockTimestampInsertion = 1;
+    }
+}
+#endif
+
+static void nvenc_codec_specific_pic_params(AVCodecContext *avctx, const AVFrame *frame,
                                             NV_ENC_PIC_PARAMS *params,
                                             NV_ENC_SEI_PAYLOAD *sei_data,
                                             int sei_count)
@@ -2437,6 +2550,11 @@ static void nvenc_codec_specific_pic_params(AVCodecContext *avctx,
             params->codecPicParams.h264PicParams.seiPayloadArray = sei_data;
             params->codecPicParams.h264PicParams.seiPayloadArrayCnt = sei_count;
         }
+
+#ifdef NVENC_HAVE_TIME_CODE
+        if (ctx->s12m_tc)
+            nvenc_fill_time_code(avctx, frame, &params->codecPicParams.h264PicParams.timeCode);
+#endif
 
       break;
     case AV_CODEC_ID_HEVC:
@@ -2505,6 +2623,9 @@ static int nvenc_set_timestamp(AVCodecContext *avctx,
 
     // This can be more than necessary, but we don't know the real reorder delay.
     delay = FFMAX(ctx->encode_config.frameIntervalP - 1, 0);
+#ifdef NVENC_HAVE_MVHEVC
+    delay *= ctx->multiview ? 2 : 1;
+#endif
     if (ctx->output_frame_num >= delay) {
         pkt->dts = timestamp_queue_dequeue(ctx->timestamp_list);
         ctx->output_frame_num++;
@@ -2739,7 +2860,7 @@ static int prepare_sei_data_array(AVCodecContext *avctx, const AVFrame *frame)
         }
     }
 
-    if (ctx->s12m_tc && av_frame_get_side_data(frame, AV_FRAME_DATA_S12M_TIMECODE)) {
+    if (ctx->s12m_tc && avctx->codec->id != AV_CODEC_ID_H264 && av_frame_get_side_data(frame, AV_FRAME_DATA_S12M_TIMECODE)) {
         void *tc_data = NULL;
         size_t tc_size = 0;
 
@@ -2904,6 +3025,78 @@ static void reconfig_encoder(AVCodecContext *avctx, const AVFrame *frame)
     }
 }
 
+#ifdef NVENC_HAVE_HEVC_AND_AV1_MASTERING_METADATA
+static int nvenc_set_mastering_display_data(AVCodecContext *avctx, const AVFrame *frame, NV_ENC_PIC_PARAMS *pic_params,
+                                            MASTERING_DISPLAY_INFO *mastering_disp_info, CONTENT_LIGHT_LEVEL *content_light_level)
+{
+    NvencContext *ctx = avctx->priv_data;
+
+    if (ctx->mdm || ctx->cll) {
+        const AVFrameSideData *sd_mdm = av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+        const AVFrameSideData *sd_cll = av_frame_get_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+        const int chroma_den   = (avctx->codec->id == AV_CODEC_ID_AV1) ? 1 << 16 : 50000;
+        const int max_luma_den = (avctx->codec->id == AV_CODEC_ID_AV1) ? 1 << 8  : 10000;
+        const int min_luma_den = (avctx->codec->id == AV_CODEC_ID_AV1) ? 1 << 14 : 10000;
+
+        if (!sd_mdm)
+            sd_mdm = av_frame_side_data_get(avctx->decoded_side_data,
+                                            avctx->nb_decoded_side_data,
+                                            AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+        if (!sd_cll)
+            sd_cll = av_frame_side_data_get(avctx->decoded_side_data,
+                                            avctx->nb_decoded_side_data,
+                                            AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+
+        if (sd_mdm) {
+            const AVMasteringDisplayMetadata *mdm = (AVMasteringDisplayMetadata *)sd_mdm->data;
+
+            mastering_disp_info->r.x = av_rescale(mdm->display_primaries[0][0].num, chroma_den,
+                                                  mdm->display_primaries[0][0].den);
+            mastering_disp_info->r.y = av_rescale(mdm->display_primaries[0][1].num, chroma_den,
+                                                  mdm->display_primaries[0][1].den);
+            mastering_disp_info->g.x = av_rescale(mdm->display_primaries[1][0].num, chroma_den,
+                                                  mdm->display_primaries[1][0].den);
+            mastering_disp_info->g.y = av_rescale(mdm->display_primaries[1][1].num, chroma_den,
+                                                  mdm->display_primaries[1][1].den);
+            mastering_disp_info->b.x = av_rescale(mdm->display_primaries[2][0].num, chroma_den,
+                                                  mdm->display_primaries[2][0].den);
+            mastering_disp_info->b.y = av_rescale(mdm->display_primaries[2][1].num, chroma_den,
+                                                  mdm->display_primaries[2][1].den);
+            mastering_disp_info->whitePoint.x = av_rescale(mdm->white_point[0].num, chroma_den,
+                                                           mdm->white_point[0].den);
+            mastering_disp_info->whitePoint.y = av_rescale(mdm->white_point[1].num, chroma_den,
+                                                           mdm->white_point[1].den);
+            mastering_disp_info->maxLuma       = av_rescale(mdm->max_luminance.num, max_luma_den,
+                                                            mdm->max_luminance.den);
+            mastering_disp_info->minLuma       = av_rescale(mdm->min_luminance.num, min_luma_den,
+                                                            mdm->min_luminance.den);
+
+            if (avctx->codec->id == AV_CODEC_ID_HEVC)
+                pic_params->codecPicParams.hevcPicParams.pMasteringDisplay = mastering_disp_info;
+            else if (avctx->codec->id == AV_CODEC_ID_AV1)
+                pic_params->codecPicParams.av1PicParams.pMasteringDisplay  = mastering_disp_info;
+            else
+                return AVERROR_BUG;
+        }
+        if (sd_cll) {
+            const AVContentLightMetadata *cll = (AVContentLightMetadata *)sd_cll->data;
+
+            content_light_level->maxContentLightLevel    = cll->MaxCLL;
+            content_light_level->maxPicAverageLightLevel = cll->MaxFALL;
+
+            if (avctx->codec->id == AV_CODEC_ID_HEVC)
+                pic_params->codecPicParams.hevcPicParams.pMaxCll = content_light_level;
+            else if (avctx->codec->id == AV_CODEC_ID_AV1)
+                pic_params->codecPicParams.av1PicParams.pMaxCll  = content_light_level;
+            else
+                return AVERROR_BUG;
+        }
+    }
+
+    return 0;
+}
+#endif
+
 static int nvenc_send_frame(AVCodecContext *avctx, const AVFrame *frame)
 {
     NVENCSTATUS nv_status;
@@ -2914,6 +3107,9 @@ static int nvenc_send_frame(AVCodecContext *avctx, const AVFrame *frame)
 #ifdef NVENC_HAVE_HEVC_AND_AV1_MASTERING_METADATA
     MASTERING_DISPLAY_INFO mastering_disp_info = { 0 };
     CONTENT_LIGHT_LEVEL content_light_level = { 0 };
+#endif
+#ifdef NVENC_HAVE_MVHEVC
+    HEVC_3D_REFERENCE_DISPLAY_INFO ref_disp_info = { 0 };
 #endif
 
     NvencContext *ctx = avctx->priv_data;
@@ -2980,73 +3176,63 @@ static int nvenc_send_frame(AVCodecContext *avctx, const AVFrame *frame)
         }
 
 #ifdef NVENC_HAVE_HEVC_AND_AV1_MASTERING_METADATA
-        if (ctx->mdm || ctx->cll) {
-            const AVFrameSideData *sd_mdm = av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
-            const AVFrameSideData *sd_cll = av_frame_get_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
-            const int chroma_den   = (avctx->codec->id == AV_CODEC_ID_AV1) ? 1 << 16 : 50000;
-            const int max_luma_den = (avctx->codec->id == AV_CODEC_ID_AV1) ? 1 << 8  : 10000;
-            const int min_luma_den = (avctx->codec->id == AV_CODEC_ID_AV1) ? 1 << 14 : 10000;
+        res = nvenc_set_mastering_display_data(avctx, frame, &pic_params, &mastering_disp_info, &content_light_level);
+        if (res < 0)
+            return res;
+#endif
 
-            if (!sd_mdm)
-                sd_mdm = av_frame_side_data_get(avctx->decoded_side_data,
-                                                avctx->nb_decoded_side_data,
-                                                AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
-            if (!sd_cll)
-                sd_cll = av_frame_side_data_get(avctx->decoded_side_data,
-                                                avctx->nb_decoded_side_data,
-                                                AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+#ifdef NVENC_HAVE_MVHEVC
+        if (ctx->multiview) {
+            const AVFrameSideData *sd_tdrdi = av_frame_get_side_data(frame, AV_FRAME_DATA_3D_REFERENCE_DISPLAYS);
+            const AVFrameSideData *sd_view_id = av_frame_get_side_data(frame, AV_FRAME_DATA_VIEW_ID);
 
-            if (sd_mdm) {
-                const AVMasteringDisplayMetadata *mdm = (AVMasteringDisplayMetadata *)sd_mdm->data;
+            if (sd_view_id)
+                ctx->next_view_id = *(int*)sd_view_id->data;
 
-                mastering_disp_info.r.x = av_rescale(mdm->display_primaries[0][0].num, chroma_den,
-                                                     mdm->display_primaries[0][0].den);
-                mastering_disp_info.r.y = av_rescale(mdm->display_primaries[0][1].num, chroma_den,
-                                                     mdm->display_primaries[0][1].den);
-                mastering_disp_info.g.x = av_rescale(mdm->display_primaries[1][0].num, chroma_den,
-                                                     mdm->display_primaries[1][0].den);
-                mastering_disp_info.g.y = av_rescale(mdm->display_primaries[1][1].num, chroma_den,
-                                                     mdm->display_primaries[1][1].den);
-                mastering_disp_info.b.x = av_rescale(mdm->display_primaries[2][0].num, chroma_den,
-                                                     mdm->display_primaries[2][0].den);
-                mastering_disp_info.b.y = av_rescale(mdm->display_primaries[2][1].num, chroma_den,
-                                                     mdm->display_primaries[2][1].den);
-                mastering_disp_info.whitePoint.x = av_rescale(mdm->white_point[0].num, chroma_den,
-                                                              mdm->white_point[0].den);
-                mastering_disp_info.whitePoint.y = av_rescale(mdm->white_point[1].num, chroma_den,
-                                                              mdm->white_point[1].den);
-                mastering_disp_info.maxLuma       = av_rescale(mdm->max_luminance.num, max_luma_den,
-                                                               mdm->max_luminance.den);
-                mastering_disp_info.minLuma       = av_rescale(mdm->min_luminance.num, min_luma_den,
-                                                               mdm->min_luminance.den);
+            pic_params.codecPicParams.hevcPicParams.viewId = ctx->next_view_id;
 
-                if (avctx->codec->id == AV_CODEC_ID_HEVC)
-                    pic_params.codecPicParams.hevcPicParams.pMasteringDisplay = &mastering_disp_info;
-                else if (avctx->codec->id == AV_CODEC_ID_AV1)
-                    pic_params.codecPicParams.av1PicParams.pMasteringDisplay  = &mastering_disp_info;
-                else
-                    return AVERROR_BUG;
+            if (sd_tdrdi) {
+                AV3DReferenceDisplaysInfo *tdrdi = (AV3DReferenceDisplaysInfo*)sd_tdrdi->data;
+
+                ref_disp_info.refViewingDistanceFlag = tdrdi->ref_viewing_distance_flag;
+                ref_disp_info.precRefViewingDist = tdrdi->prec_ref_viewing_dist;
+                ref_disp_info.precRefDisplayWidth = tdrdi->prec_ref_display_width;
+
+                ref_disp_info.numRefDisplaysMinus1 = tdrdi->num_ref_displays - 1;
+
+                for (i = 0; i < tdrdi->num_ref_displays &&
+                            i < FF_ARRAY_ELEMS(ref_disp_info.leftViewId); i++) {
+                    const AV3DReferenceDisplay *display = av_tdrdi_get_display(tdrdi, i);
+                    ref_disp_info.leftViewId[i] = display->left_view_id;
+                    ref_disp_info.rightViewId[i] = display->right_view_id;
+                    ref_disp_info.exponentRefDisplayWidth[i] = display->exponent_ref_display_width;
+                    ref_disp_info.mantissaRefDisplayWidth[i] = display->mantissa_ref_display_width;
+                    ref_disp_info.exponentRefViewingDistance[i] = display->exponent_ref_viewing_distance;
+                    ref_disp_info.mantissaRefViewingDistance[i] = display->mantissa_ref_viewing_distance;
+                    ref_disp_info.additionalShiftPresentFlag[i] = display->additional_shift_present_flag;
+                    ref_disp_info.numSampleShiftPlus512[i] = display->num_sample_shift + 512;
+                }
+
+                pic_params.codecPicParams.hevcPicParams.p3DReferenceDisplayInfo = &ref_disp_info;
+                ctx->display_sei_sent = 1;
+            } else if (!ctx->display_sei_sent) {
+                ref_disp_info.precRefDisplayWidth = 31;
+                ref_disp_info.leftViewId[0] = 0;
+                ref_disp_info.rightViewId[0] = 1;
+
+                pic_params.codecPicParams.hevcPicParams.p3DReferenceDisplayInfo = &ref_disp_info;
+                ctx->display_sei_sent = 1;
             }
-            if (sd_cll) {
-                const AVContentLightMetadata *cll = (AVContentLightMetadata *)sd_cll->data;
 
-                content_light_level.maxContentLightLevel    = cll->MaxCLL;
-                content_light_level.maxPicAverageLightLevel = cll->MaxFALL;
-
-                if (avctx->codec->id == AV_CODEC_ID_HEVC)
-                    pic_params.codecPicParams.hevcPicParams.pMaxCll = &content_light_level;
-                else if (avctx->codec->id == AV_CODEC_ID_AV1)
-                    pic_params.codecPicParams.av1PicParams.pMaxCll  = &content_light_level;
-                else
-                    return AVERROR_BUG;
-            }
+            ctx->next_view_id = !ctx->next_view_id;
         }
 #endif
+
         res = nvenc_store_frame_data(avctx, &pic_params, frame);
         if (res < 0)
             return res;
 
-        nvenc_codec_specific_pic_params(avctx, &pic_params, ctx->sei_data, sei_count);
+        nvenc_codec_specific_pic_params(avctx, frame, &pic_params, ctx->sei_data, sei_count);
     } else {
         pic_params.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
     }

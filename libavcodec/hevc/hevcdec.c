@@ -36,6 +36,7 @@
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/stereo3d.h"
+#include "libavutil/tdrdi.h"
 #include "libavutil/timecode.h"
 
 #include "aom_film_grain.h"
@@ -151,10 +152,10 @@ static int pic_arrays_init(HEVCLayerContext *l, const HEVCSPS *sps)
             int w = sps->width >> sps->hshift[c_idx];
             int h = sps->height >> sps->vshift[c_idx];
             l->sao_pixel_buffer_h[c_idx] =
-                av_malloc((w * 2 * sps->ctb_height) <<
+                av_mallocz((w * 2 * sps->ctb_height) <<
                           sps->pixel_shift);
             l->sao_pixel_buffer_v[c_idx] =
-                av_malloc((h * 2 * sps->ctb_width) <<
+                av_mallocz((h * 2 * sps->ctb_width) <<
                           sps->pixel_shift);
             if (!l->sao_pixel_buffer_h[c_idx] ||
                 !l->sao_pixel_buffer_v[c_idx])
@@ -174,11 +175,8 @@ static int pred_weight_table(SliceHeader *sh, void *logctx,
 {
     int i = 0;
     int j = 0;
-    uint8_t luma_weight_l0_flag[16];
-    uint8_t chroma_weight_l0_flag[16];
-    uint8_t luma_weight_l1_flag[16];
-    uint8_t chroma_weight_l1_flag[16];
     int luma_log2_weight_denom;
+    unsigned luma_weight_flags, chroma_weight_flags;
 
     luma_log2_weight_denom = get_ue_golomb_long(gb);
     if (luma_log2_weight_denom < 0 || luma_log2_weight_denom > 7) {
@@ -195,29 +193,22 @@ static int pred_weight_table(SliceHeader *sh, void *logctx,
         sh->chroma_log2_weight_denom = chroma_log2_weight_denom;
     }
 
+    luma_weight_flags   = get_bits(gb, sh->nb_refs[L0]);
+    chroma_weight_flags = sps->chroma_format_idc != 0 ? get_bits(gb, sh->nb_refs[L0]) : 0;
     for (i = 0; i < sh->nb_refs[L0]; i++) {
-        luma_weight_l0_flag[i] = get_bits1(gb);
-        if (!luma_weight_l0_flag[i]) {
-            sh->luma_weight_l0[i] = 1 << sh->luma_log2_weight_denom;
-            sh->luma_offset_l0[i] = 0;
-        }
-    }
-    if (sps->chroma_format_idc != 0) {
-        for (i = 0; i < sh->nb_refs[L0]; i++)
-            chroma_weight_l0_flag[i] = get_bits1(gb);
-    } else {
-        for (i = 0; i < sh->nb_refs[L0]; i++)
-            chroma_weight_l0_flag[i] = 0;
-    }
-    for (i = 0; i < sh->nb_refs[L0]; i++) {
-        if (luma_weight_l0_flag[i]) {
+        unsigned flag_bit = 1 << (sh->nb_refs[L0] - 1 - i);
+
+        if (luma_weight_flags & flag_bit) {
             int delta_luma_weight_l0 = get_se_golomb(gb);
             if ((int8_t)delta_luma_weight_l0 != delta_luma_weight_l0)
                 return AVERROR_INVALIDDATA;
             sh->luma_weight_l0[i] = (1 << sh->luma_log2_weight_denom) + delta_luma_weight_l0;
             sh->luma_offset_l0[i] = get_se_golomb(gb);
+        } else {
+            sh->luma_weight_l0[i] = 1 << sh->luma_log2_weight_denom;
+            sh->luma_offset_l0[i] = 0;
         }
-        if (chroma_weight_l0_flag[i]) {
+        if (chroma_weight_flags & flag_bit) {
             for (j = 0; j < 2; j++) {
                 int delta_chroma_weight_l0 = get_se_golomb(gb);
                 int delta_chroma_offset_l0 = get_se_golomb(gb);
@@ -239,29 +230,22 @@ static int pred_weight_table(SliceHeader *sh, void *logctx,
         }
     }
     if (sh->slice_type == HEVC_SLICE_B) {
+        luma_weight_flags   = get_bits(gb, sh->nb_refs[L1]);
+        chroma_weight_flags = sps->chroma_format_idc != 0 ? get_bits(gb, sh->nb_refs[L1]) : 0;
         for (i = 0; i < sh->nb_refs[L1]; i++) {
-            luma_weight_l1_flag[i] = get_bits1(gb);
-            if (!luma_weight_l1_flag[i]) {
-                sh->luma_weight_l1[i] = 1 << sh->luma_log2_weight_denom;
-                sh->luma_offset_l1[i] = 0;
-            }
-        }
-        if (sps->chroma_format_idc != 0) {
-            for (i = 0; i < sh->nb_refs[L1]; i++)
-                chroma_weight_l1_flag[i] = get_bits1(gb);
-        } else {
-            for (i = 0; i < sh->nb_refs[L1]; i++)
-                chroma_weight_l1_flag[i] = 0;
-        }
-        for (i = 0; i < sh->nb_refs[L1]; i++) {
-            if (luma_weight_l1_flag[i]) {
+            unsigned flag_bit = 1 << (sh->nb_refs[L1] - 1 - i);
+
+            if (luma_weight_flags & flag_bit) {
                 int delta_luma_weight_l1 = get_se_golomb(gb);
                 if ((int8_t)delta_luma_weight_l1 != delta_luma_weight_l1)
                     return AVERROR_INVALIDDATA;
                 sh->luma_weight_l1[i] = (1 << sh->luma_log2_weight_denom) + delta_luma_weight_l1;
                 sh->luma_offset_l1[i] = get_se_golomb(gb);
+            } else {
+                sh->luma_weight_l1[i] = 1 << sh->luma_log2_weight_denom;
+                sh->luma_offset_l1[i] = 0;
             }
-            if (chroma_weight_l1_flag[i]) {
+            if (chroma_weight_flags & flag_bit) {
                 for (j = 0; j < 2; j++) {
                     int delta_chroma_weight_l1 = get_se_golomb(gb);
                     int delta_chroma_offset_l1 = get_se_golomb(gb);
@@ -1127,7 +1111,7 @@ static int hls_slice_header(SliceHeader *sh, const HEVCContext *s, GetBitContext
     if (pps->tiles_enabled_flag || pps->entropy_coding_sync_enabled_flag) {
         unsigned num_entry_point_offsets = get_ue_golomb_long(gb);
         // It would be possible to bound this tighter but this here is simpler
-        if (num_entry_point_offsets > get_bits_left(gb)) {
+        if (num_entry_point_offsets > get_bits_left(gb) || num_entry_point_offsets > UINT16_MAX) {
             av_log(s->avctx, AV_LOG_ERROR, "num_entry_point_offsets %d is invalid\n", num_entry_point_offsets);
             return AVERROR_INVALIDDATA;
         }
@@ -1171,11 +1155,17 @@ static int hls_slice_header(SliceHeader *sh, const HEVCContext *s, GetBitContext
     }
 
     ret = get_bits1(gb);
-    if (!ret) {
+    if (!ret && get_bits_left(gb) >= 0) {
         av_log(s->avctx, AV_LOG_ERROR, "alignment_bit_equal_to_one=0\n");
         return AVERROR_INVALIDDATA;
     }
     sh->data_offset = align_get_bits(gb) - gb->buffer;
+
+    if (get_bits_left(gb) < 0) {
+        av_log(s->avctx, AV_LOG_ERROR,
+               "Overread slice header by %d bits\n", -get_bits_left(gb));
+        return AVERROR_INVALIDDATA;
+    }
 
     // Inferred parameters
     sh->slice_qp = 26U + pps->pic_init_qp_minus26 + sh->slice_qp_delta;
@@ -1194,12 +1184,6 @@ static int hls_slice_header(SliceHeader *sh, const HEVCContext *s, GetBitContext
     if (sh->dependent_slice_segment_flag &&
         (!sh->slice_ctb_addr_rs || !pps->ctb_addr_rs_to_ts[sh->slice_ctb_addr_rs])) {
         av_log(s->avctx, AV_LOG_ERROR, "Impossible slice segment.\n");
-        return AVERROR_INVALIDDATA;
-    }
-
-    if (get_bits_left(gb) < 0) {
-        av_log(s->avctx, AV_LOG_ERROR,
-               "Overread slice header by %d bits\n", -get_bits_left(gb));
         return AVERROR_INVALIDDATA;
     }
 
@@ -2112,7 +2096,7 @@ static void hls_prediction_unit(HEVCLocalContext *lc,
                                 int log2_cb_size, int partIdx, int idx)
 {
 #define POS(c_idx, x, y)                                                          \
-    &s->cur_frame->f->data[c_idx] ?                                               \
+    s->cur_frame->f->data[c_idx] ?                                                \
     &s->cur_frame->f->data[c_idx][((y) >> sps->vshift[c_idx]) * linesize[c_idx] + \
                            (((x) >> sps->hshift[c_idx]) << sps->pixel_shift)] : NULL
     const HEVCContext *const s = lc->parent;
@@ -2125,7 +2109,7 @@ static void hls_prediction_unit(HEVCLocalContext *lc,
     const RefPicList *refPicList = s->cur_frame->refPicList;
     const HEVCFrame *ref0 = NULL, *ref1 = NULL;
     const int *linesize = s->cur_frame->f->linesize;
-    uint8_t *dst0 = POS(0, x0, y0);
+    uint8_t *dst0 = s->cur_frame->f->data[0] + y0 * linesize[0] + (x0 << sps->pixel_shift);
     uint8_t *dst1 = POS(1, x0, y0);
     uint8_t *dst2 = POS(2, x0, y0);
     int log2_min_cb_size = sps->log2_min_cb_size;
@@ -2768,7 +2752,7 @@ static int hls_decode_entry(HEVCContext *s, GetBitContext *gb)
     const HEVCPPS   *const pps = s->pps;
     const HEVCSPS   *const sps = pps->sps;
     const uint8_t *slice_data = gb->buffer + s->sh.data_offset;
-    const size_t   slice_size = gb->buffer_end - gb->buffer - s->sh.data_offset;
+    const size_t   slice_size = get_bits_bytesize(gb, 1) - s->sh.data_offset;
     int ctb_size    = 1 << sps->log2_ctb_size;
     int more_data   = 1;
     int x_ctb       = 0;
@@ -3401,7 +3385,10 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
         goto fail;
 
     if (s->avctx->hwaccel) {
-        ret = FF_HW_CALL(s->avctx, start_frame, NULL, 0);
+        AVCodecInternal *avci = s->avctx->internal;
+        AVPacket *avpkt = avci->in_pkt;
+        ret = FF_HW_CALL(s->avctx, start_frame,
+                         avpkt->buf, NULL, 0);
         if (ret < 0)
             goto fail;
     }
@@ -3557,7 +3544,7 @@ static int decode_slice(HEVCContext *s, unsigned nal_idx, GetBitContext *gb)
 
     ret = hls_slice_header(&s->sh, s, gb);
     if (ret < 0) {
-        // hls_slice_header() does not cleanup on failure thus the state now is inconsistant so we cannot use it on depandant slices
+        // hls_slice_header() does not cleanup on failure thus the state now is inconsistent so we cannot use it on dependent slices
         s->slice_initialized = 0;
         return ret;
     }
@@ -3760,8 +3747,10 @@ static int decode_nal_units(HEVCContext *s, const uint8_t *buf, int length)
         }
 
         s->rpu_buf = av_buffer_alloc(nal->raw_size - 2);
-        if (!s->rpu_buf)
-            return AVERROR(ENOMEM);
+        if (!s->rpu_buf) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
         memcpy(s->rpu_buf->data, nal->raw_data + 2, nal->raw_size - 2);
 
         ret = ff_dovi_rpu_parse(&s->dovi_ctx, nal->data + 2, nal->size - 2,
@@ -4113,6 +4102,55 @@ static int hevc_update_thread_context(AVCodecContext *dst,
 }
 #endif
 
+static int hevc_sei_to_context(AVCodecContext *avctx, HEVCSEI *sei)
+{
+    int ret;
+
+    if (sei->tdrdi.num_ref_displays) {
+        AVBufferRef *buf;
+        size_t size;
+        AV3DReferenceDisplaysInfo *tdrdi = av_tdrdi_alloc(sei->tdrdi.num_ref_displays, &size);
+
+        if (!tdrdi)
+            return AVERROR(ENOMEM);
+
+        buf = av_buffer_create((uint8_t *)tdrdi, size, NULL, NULL, 0);
+        if (!buf) {
+            av_free(tdrdi);
+            return AVERROR(ENOMEM);
+        }
+
+        tdrdi->prec_ref_display_width = sei->tdrdi.prec_ref_display_width;
+        tdrdi->ref_viewing_distance_flag = sei->tdrdi.ref_viewing_distance_flag;
+        tdrdi->prec_ref_viewing_dist = sei->tdrdi.prec_ref_viewing_dist;
+        tdrdi->num_ref_displays = sei->tdrdi.num_ref_displays;
+        for (int i = 0; i < sei->tdrdi.num_ref_displays; i++) {
+            AV3DReferenceDisplay *display = av_tdrdi_get_display(tdrdi, i);
+
+            display->left_view_id                  = sei->tdrdi.left_view_id[i];
+            display->right_view_id                 = sei->tdrdi.right_view_id[i];
+            display->exponent_ref_display_width    = sei->tdrdi.exponent_ref_display_width[i];
+            display->mantissa_ref_display_width    = sei->tdrdi.mantissa_ref_display_width[i];
+            display->exponent_ref_viewing_distance = sei->tdrdi.exponent_ref_viewing_distance[i];
+            display->mantissa_ref_viewing_distance = sei->tdrdi.mantissa_ref_viewing_distance[i];
+            display->additional_shift_present_flag = sei->tdrdi.additional_shift_present_flag[i];
+            display->num_sample_shift              = sei->tdrdi.num_sample_shift[i];
+        }
+        ret = ff_frame_new_side_data_from_buf_ext(avctx, &avctx->decoded_side_data, &avctx->nb_decoded_side_data,
+                                                  AV_FRAME_DATA_3D_REFERENCE_DISPLAYS, &buf);
+        if (ret < 0) {
+            av_buffer_unref(&buf);
+            return ret;
+        }
+    }
+
+    ret = ff_h2645_sei_to_context(avctx, &sei->common);
+    if (ret < 0)
+        return ret;
+
+    return 0;
+}
+
 static av_cold int hevc_decode_init(AVCodecContext *avctx)
 {
     HEVCContext *s = avctx->priv_data;
@@ -4136,7 +4174,7 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
                 return ret;
             }
 
-            ret = ff_h2645_sei_to_context(avctx, &s->sei.common);
+            ret = hevc_sei_to_context(avctx, &s->sei);
             if (ret < 0)
                 return ret;
         }
@@ -4149,7 +4187,7 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
     return 0;
 }
 
-static void hevc_decode_flush(AVCodecContext *avctx)
+static av_cold void hevc_decode_flush(AVCodecContext *avctx)
 {
     HEVCContext *s = avctx->priv_data;
     ff_hevc_flush_dpb(s);
@@ -4168,7 +4206,7 @@ static void hevc_decode_flush(AVCodecContext *avctx)
 static const AVOption options[] = {
     { "apply_defdispwin", "Apply default display window from VUI", OFFSET(apply_defdispwin),
         AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
-    { "strict-displaywin", "stricly apply default display window size", OFFSET(apply_defdispwin),
+    { "strict-displaywin", "strictly apply default display window size", OFFSET(apply_defdispwin),
         AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
     { "view_ids", "Array of view IDs that should be decoded and output; a single -1 to decode all views",
         .offset = OFFSET(view_ids), .type = AV_OPT_TYPE_INT | AV_OPT_TYPE_FLAG_ARRAY,
